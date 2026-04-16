@@ -1,11 +1,9 @@
 package cn.suhoan.anaxa.common.json;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
-import java.io.IOException;
 import java.util.Map;
 
 public final class JsonSupport {
@@ -23,7 +21,7 @@ public final class JsonSupport {
     public static byte[] writeBytes(Object value) {
         try {
             return MAPPER.writeValueAsBytes(value == null ? Map.of() : value);
-        } catch (JsonProcessingException exception) {
+        } catch (Exception exception) {
             throw new IllegalStateException("Failed to serialize JSON payload", exception);
         }
     }
@@ -31,7 +29,7 @@ public final class JsonSupport {
     public static String writeString(Object value) {
         try {
             return MAPPER.writeValueAsString(value == null ? Map.of() : value);
-        } catch (JsonProcessingException exception) {
+        } catch (Exception exception) {
             throw new IllegalStateException("Failed to serialize JSON payload", exception);
         }
     }
@@ -39,7 +37,7 @@ public final class JsonSupport {
     public static <T> T read(byte[] bytes, Class<T> type) {
         try {
             return MAPPER.readValue(bytes, type);
-        } catch (IOException exception) {
+        } catch (Exception exception) {
             throw new IllegalArgumentException("Failed to deserialize JSON body", exception);
         }
     }
@@ -50,7 +48,7 @@ public final class JsonSupport {
         }
         try {
             return MAPPER.readValue(bytes, MAP_TYPE);
-        } catch (IOException exception) {
+        } catch (Exception exception) {
             throw new IllegalArgumentException("Failed to deserialize JSON map", exception);
         }
     }

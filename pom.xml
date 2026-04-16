@@ -22,7 +22,7 @@
         <maven.compiler.release>26</maven.compiler.release>
         <maven.compiler.parameters>true</maven.compiler.parameters>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <jackson.version>2.17.2</jackson.version>
+        <jackson.version>3.1.2</jackson.version>
         <junit.version>5.10.2</junit.version>
         <preview.argLine>--enable-preview --add-modules jdk.incubator.vector</preview.argLine>
     </properties>
@@ -30,7 +30,7 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>com.fasterxml.jackson.core</groupId>
+                <groupId>tools.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson.version}</version>
             </dependency>
