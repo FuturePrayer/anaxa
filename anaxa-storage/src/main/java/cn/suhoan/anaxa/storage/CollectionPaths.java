@@ -1,5 +1,7 @@
 package cn.suhoan.anaxa.storage;
 
+import cn.suhoan.anaxa.common.model.CollectionDefinition;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -12,17 +14,26 @@ public record CollectionPaths(
         Path metadataFile,
         Path walDirectory,
         Path activeWal,
-        Path segmentsDirectory
+        Path segmentsDirectory,
+        Path quarantineDirectory
 ) {
     public static CollectionPaths of(Path dataRoot, String collectionName) {
-        Path root = dataRoot.resolve(collectionName);
+        return of(dataRoot, CollectionDefinition.DEFAULT_TENANT, collectionName);
+    }
+
+    public static CollectionPaths of(Path dataRoot, String tenantId, String collectionName) {
+        String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
+        Path root = CollectionDefinition.DEFAULT_TENANT.equals(normalizedTenantId)
+                ? dataRoot.resolve(collectionName)
+                : dataRoot.resolve("tenants").resolve(normalizedTenantId).resolve("collections").resolve(collectionName);
         Path walDirectory = root.resolve("wal");
         return new CollectionPaths(
                 root,
                 root.resolve("collection.json"),
                 walDirectory,
                 walDirectory.resolve("active.wal"),
-                root.resolve("segments")
+                root.resolve("segments"),
+                root.resolve("quarantine")
         );
     }
 
@@ -30,6 +41,7 @@ public record CollectionPaths(
         Files.createDirectories(root);
         Files.createDirectories(walDirectory);
         Files.createDirectories(segmentsDirectory);
+        Files.createDirectories(quarantineDirectory);
     }
 
     public Path frozenWal(long generation) {

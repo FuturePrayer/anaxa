@@ -10,10 +10,12 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.zip.CRC32;
 
 public final class WalAppender implements AutoCloseable {
     private static final int MAGIC = 0x57414C31;
-    private static final int VERSION = 1;
+    public static final int CURRENT_VERSION = 3;
+    static final int FLAG_TOMBSTONE = 1;
     private static final int HEADER_BYTES = Integer.BYTES * 3;
 
     private final Path path;
@@ -58,7 +60,7 @@ public final class WalAppender implements AutoCloseable {
         if (channel.size() == 0L) {
             ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES)
                     .putInt(MAGIC)
-                    .putInt(VERSION)
+                    .putInt(CURRENT_VERSION)
                     .putInt(dimension);
             header.flip();
             writeFully(header);
@@ -72,7 +74,7 @@ public final class WalAppender implements AutoCloseable {
             header.flip();
             if (header.remaining() != HEADER_BYTES
                     || header.getInt() != MAGIC
-                    || header.getInt() != VERSION
+                    || header.getInt() != CURRENT_VERSION
                     || header.getInt() != dimension) {
                 throw new IOException("Invalid WAL header for " + path);
             }
@@ -81,7 +83,7 @@ public final class WalAppender implements AutoCloseable {
     }
 
     private void writeRecord(WalRecord record) throws IOException {
-        if (record.vector().length != dimension) {
+        if (!record.tombstone() && record.vector().length != dimension) {
             throw new IllegalArgumentException(
                     "WAL record dimension %d does not match collection dimension %d"
                             .formatted(record.vector().length, dimension)
@@ -90,30 +92,50 @@ public final class WalAppender implements AutoCloseable {
 
         byte[] idBytes = record.id().getBytes(StandardCharsets.UTF_8);
         byte[] payloadBytes = JsonSupport.writeBytes(record.payload());
-        int bodyLength = Long.BYTES
+        int vectorBytes = record.tombstone() ? 0 : (dimension * Float.BYTES);
+        int bodyLength = Integer.BYTES
+                + Long.BYTES
                 + Integer.BYTES
                 + Integer.BYTES
                 + idBytes.length
-                + (dimension * Float.BYTES)
+                + vectorBytes
                 + payloadBytes.length;
 
         ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES + bodyLength);
-        buffer.putInt(bodyLength);
+        buffer.putInt(record.tombstone() ? FLAG_TOMBSTONE : 0);
         buffer.putLong(record.sequence());
         buffer.putInt(idBytes.length);
         buffer.putInt(payloadBytes.length);
         buffer.put(idBytes);
-        for (float value : record.vector()) {
-            buffer.putFloat(value);
+        if (!record.tombstone()) {
+            for (float value : record.vector()) {
+                buffer.putFloat(value);
+            }
         }
         buffer.put(payloadBytes);
         buffer.flip();
-        writeFully(buffer);
+
+        byte[] body = new byte[bodyLength];
+        buffer.get(body);
+        int checksum = checksum(body);
+
+        ByteBuffer recordBuffer = ByteBuffer.allocate(Integer.BYTES + bodyLength + Integer.BYTES);
+        recordBuffer.putInt(bodyLength);
+        recordBuffer.put(body);
+        recordBuffer.putInt(checksum);
+        recordBuffer.flip();
+        writeFully(recordBuffer);
     }
 
     private void writeFully(ByteBuffer buffer) throws IOException {
         while (buffer.hasRemaining()) {
             channel.write(buffer);
         }
+    }
+
+    static int checksum(byte[] body) {
+        CRC32 crc32 = new CRC32();
+        crc32.update(body);
+        return (int) crc32.getValue();
     }
 }

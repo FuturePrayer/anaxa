@@ -7,12 +7,23 @@ import java.util.Map;
 public record MemTableEntry(
         String id,
         long sequence,
+        boolean tombstone,
         float norm,
         MemorySegment vectorSegment,
         Map<String, Object> payload,
         int byteFootprint
-) {
+) implements SegmentWritableEntry {
+    private static final byte[] EMPTY_VECTOR_BYTES = new byte[0];
+
     public WalRecord toWalRecord() {
-        return new WalRecord(id, vectorSegment.toArray(ValueLayout.JAVA_FLOAT), payload, sequence);
+        if (tombstone) {
+            return WalRecord.tombstone(id, sequence);
+        }
+        return WalRecord.live(id, vectorSegment.toArray(ValueLayout.JAVA_FLOAT), payload, sequence);
+    }
+
+    @Override
+    public byte[] vectorBytes() {
+        return tombstone ? EMPTY_VECTOR_BYTES : vectorSegment.toArray(ValueLayout.JAVA_BYTE);
     }
 }

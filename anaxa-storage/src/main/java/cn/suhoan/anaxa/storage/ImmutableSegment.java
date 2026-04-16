@@ -16,11 +16,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.zip.CRC32;
 
 public final class ImmutableSegment implements SearchableVectors, AutoCloseable {
     private static final int MAGIC = 0x53454731;
-    private static final int VERSION = 1;
+    static final int CURRENT_VERSION = 3;
+    private static final int VERSION_LEGACY = 1;
+    private static final int VERSION_TOMBSTONES = 2;
+    static final int FLAG_TOMBSTONE = 1;
     private static final long HEADER_BYTES = Integer.BYTES + Integer.BYTES + Integer.BYTES + Integer.BYTES + Long.BYTES + Integer.BYTES;
+    static final int FOOTER_MAGIC = 0x53454746;
+    static final long FOOTER_BYTES = Integer.BYTES + Integer.BYTES + Long.BYTES;
     private static final ValueLayout.OfInt INT_LAYOUT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
     private static final ValueLayout.OfLong LONG_LAYOUT = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
     private static final ValueLayout.OfFloat FLOAT_LAYOUT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
@@ -54,10 +60,19 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
             MemorySegment mappedSegment = channel.map(FileChannel.MapMode.READ_ONLY, 0L, channel.size(), arena);
             Header header = readHeader(mappedSegment, definition);
             ArrayList<SegmentEntry> entries = new ArrayList<>(header.entryCount());
+            long dataLimit = header.version() == CURRENT_VERSION
+                    ? validateFooterAndResolveDataLimit(mappedSegment)
+                    : mappedSegment.byteSize();
 
             long offset = HEADER_BYTES;
             long vectorBytes = (long) definition.dimension() * Float.BYTES;
             for (int index = 0; index < header.entryCount(); index++) {
+                int flags = 0;
+                if (header.version() >= VERSION_TOMBSTONES) {
+                    flags = mappedSegment.get(INT_LAYOUT, offset);
+                    offset += Integer.BYTES;
+                }
+
                 long sequence = mappedSegment.get(LONG_LAYOUT, offset);
                 offset += Long.BYTES;
 
@@ -73,13 +88,19 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
                 String id = new String(mappedSegment.asSlice(offset, idLength).toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
                 offset += idLength;
 
-                long vectorOffset = offset;
-                offset += vectorBytes;
+                boolean tombstone = (flags & FLAG_TOMBSTONE) != 0;
+                long vectorOffset = tombstone ? -1L : offset;
+                if (!tombstone) {
+                    offset += vectorBytes;
+                }
 
                 byte[] payloadBytes = mappedSegment.asSlice(offset, payloadLength).toArray(ValueLayout.JAVA_BYTE);
                 offset += payloadLength;
 
-                entries.add(new SegmentEntry(id, sequence, norm, vectorOffset, JsonSupport.readMap(payloadBytes)));
+                entries.add(new SegmentEntry(id, sequence, tombstone, norm, vectorOffset, JsonSupport.readMap(payloadBytes)));
+            }
+            if (offset != dataLimit) {
+                throw new IOException("Segment entry data length mismatch");
             }
 
             return new ImmutableSegment(path, definition, header.generation(), arena, mappedSegment, List.copyOf(entries));
@@ -101,9 +122,27 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         return entries;
     }
 
+    public byte[] vectorBytes(SegmentEntry entry) {
+        if (entry.tombstone()) {
+            return new byte[0];
+        }
+        return mappedSegment.asSlice(entry.vectorOffsetBytes(), (long) definition.dimension() * Float.BYTES)
+                .toArray(ValueLayout.JAVA_BYTE);
+    }
+
     @Override
     public String sourceId() {
-        return path.getFileName().toString();
+        return definition.tenantId() + "/" + definition.name() + "/segment-%020d".formatted(generation);
+    }
+
+    @Override
+    public long searchStateVersion() {
+        return generation;
+    }
+
+    @Override
+    public Path searchArtifactPath() {
+        return path.resolveSibling(path.getFileName().toString() + ".ann");
     }
 
     @Override
@@ -127,8 +166,9 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
             consumer.accept(
                     entry.id(),
                     entry.sequence(),
+                    entry.tombstone(),
                     entry.norm(),
-                    mappedSegment,
+                    entry.tombstone() ? MemorySegment.NULL : mappedSegment,
                     entry.vectorOffsetBytes(),
                     entry.payload()
             );
@@ -154,7 +194,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         offset += Long.BYTES;
         int entryCount = mappedSegment.get(INT_LAYOUT, offset);
 
-        if (magic != MAGIC || version != VERSION) {
+        if (magic != MAGIC || (version != VERSION_LEGACY && version != VERSION_TOMBSTONES && version != CURRENT_VERSION)) {
             throw new IOException("Invalid segment header");
         }
         if (dimension != definition.dimension()) {
@@ -169,9 +209,33 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         if (MetricType.values()[metricOrdinal] != definition.metric()) {
             throw new IOException("Segment metric does not match collection metric");
         }
-        return new Header(generation, entryCount);
+        return new Header(version, generation, entryCount);
     }
 
-    private record Header(long generation, int entryCount) {
+    private static long validateFooterAndResolveDataLimit(MemorySegment mappedSegment) throws IOException {
+        if (mappedSegment.byteSize() < HEADER_BYTES + FOOTER_BYTES) {
+            throw new IOException("Segment file too small to contain footer");
+        }
+
+        long footerOffset = mappedSegment.byteSize() - FOOTER_BYTES;
+        int footerMagic = mappedSegment.get(INT_LAYOUT, footerOffset);
+        int expectedChecksum = mappedSegment.get(INT_LAYOUT, footerOffset + Integer.BYTES);
+        long dataLength = mappedSegment.get(LONG_LAYOUT, footerOffset + Integer.BYTES * 2L);
+        if (footerMagic != FOOTER_MAGIC) {
+            throw new IOException("Invalid segment footer");
+        }
+        if (dataLength != footerOffset) {
+            throw new IOException("Segment footer data length mismatch");
+        }
+
+        CRC32 crc32 = new CRC32();
+        crc32.update(mappedSegment.asSlice(0L, dataLength).toArray(ValueLayout.JAVA_BYTE));
+        if ((int) crc32.getValue() != expectedChecksum) {
+            throw new IOException("Segment checksum mismatch");
+        }
+        return dataLength;
+    }
+
+    private record Header(int version, long generation, int entryCount) {
     }
 }

@@ -10,10 +10,12 @@ import cn.suhoan.anaxa.index.VectorMetricScorer;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
@@ -22,6 +24,7 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
     private final Arena arena;
     private final ConcurrentHashMap<String, MemTableEntry> entries;
     private final LongAdder approximateBytes;
+    private final AtomicLong searchStateVersion;
 
     public OffHeapMemTable(CollectionDefinition definition, long generation) {
         this.definition = definition;
@@ -29,6 +32,7 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         this.arena = Arena.ofShared();
         this.entries = new ConcurrentHashMap<>();
         this.approximateBytes = new LongAdder();
+        this.searchStateVersion = new AtomicLong(0L);
     }
 
     public long generation() {
@@ -53,6 +57,7 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         MemTableEntry entry = new MemTableEntry(
                 id,
                 sequence,
+                false,
                 VectorMetricScorer.norm(vector),
                 vectorSegment,
                 stablePayload,
@@ -64,6 +69,27 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         if (previous != null) {
             approximateBytes.add(-previous.byteFootprint());
         }
+        searchStateVersion.incrementAndGet();
+    }
+
+    public void tombstone(String id, long sequence) {
+        int footprint = estimateFootprint(id, Map.of(), 0);
+        MemTableEntry entry = new MemTableEntry(
+                id,
+                sequence,
+                true,
+                0.0F,
+                MemorySegment.NULL,
+                Map.of(),
+                footprint
+        );
+
+        MemTableEntry previous = entries.put(id, entry);
+        approximateBytes.add(footprint);
+        if (previous != null) {
+            approximateBytes.add(-previous.byteFootprint());
+        }
+        searchStateVersion.incrementAndGet();
     }
 
     public long approximateBytes() {
@@ -78,7 +104,12 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
 
     @Override
     public String sourceId() {
-        return "memtable-%020d".formatted(generation);
+        return definition.tenantId() + "/" + definition.name() + "/memtable-%020d".formatted(generation);
+    }
+
+    @Override
+    public long searchStateVersion() {
+        return searchStateVersion.get();
     }
 
     @Override
@@ -101,6 +132,7 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         entries.forEach((id, entry) -> consumer.accept(
                 id,
                 entry.sequence(),
+                entry.tombstone(),
                 entry.norm(),
                 entry.vectorSegment(),
                 0L,
@@ -123,6 +155,6 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
 
     private int estimateFootprint(String id, Map<String, Object> payload, int dimension) {
         int payloadBytes = cn.suhoan.anaxa.common.json.JsonSupport.writeBytes(payload).length;
-        return id.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + payloadBytes + (dimension * Float.BYTES);
+        return id.getBytes(StandardCharsets.UTF_8).length + payloadBytes + (dimension * Float.BYTES) + Integer.BYTES;
     }
 }

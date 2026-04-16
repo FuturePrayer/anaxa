@@ -4,9 +4,63 @@ import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.Objects;
+import java.util.Set;
 
-public record ServerConfig(String host, int port, Path dataDirectory, long defaultFlushThresholdBytes) {
+public record ServerConfig(
+        String host,
+        int port,
+        Path dataDirectory,
+        long defaultFlushThresholdBytes,
+        Set<String> apiKeys,
+        Path apiKeyFile,
+        int rateLimitPerMinute,
+        int rateLimitBurst,
+        long slowQueryThresholdMillis,
+        Path auditLogPath,
+        Path backupDirectory
+) {
+    public ServerConfig(String host, int port, Path dataDirectory, long defaultFlushThresholdBytes) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                Set.of(),
+                null,
+                6_000,
+                256,
+                250L,
+                dataDirectory.resolve("audit").resolve("audit.log"),
+                dataDirectory.resolve("backups")
+        );
+    }
+
+    public ServerConfig(
+            String host,
+            int port,
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            Set<String> apiKeys,
+            int rateLimitPerMinute,
+            int rateLimitBurst
+    ) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                apiKeys,
+                null,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                250L,
+                dataDirectory.resolve("audit").resolve("audit.log"),
+                dataDirectory.resolve("backups")
+        );
+    }
+
     public ServerConfig {
         host = Objects.requireNonNull(host, "host").trim();
         if (host.isEmpty()) {
@@ -19,6 +73,18 @@ public record ServerConfig(String host, int port, Path dataDirectory, long defau
         if (defaultFlushThresholdBytes <= 0L) {
             throw new IllegalArgumentException("defaultFlushThresholdBytes must be positive");
         }
+        apiKeys = Set.copyOf(Objects.requireNonNull(apiKeys, "apiKeys"));
+        if (rateLimitPerMinute < 0) {
+            throw new IllegalArgumentException("rateLimitPerMinute must not be negative");
+        }
+        if (rateLimitBurst < 0) {
+            throw new IllegalArgumentException("rateLimitBurst must not be negative");
+        }
+        if (slowQueryThresholdMillis < 0L) {
+            throw new IllegalArgumentException("slowQueryThresholdMillis must not be negative");
+        }
+        auditLogPath = auditLogPath == null ? dataDirectory.resolve("audit").resolve("audit.log") : auditLogPath;
+        backupDirectory = backupDirectory == null ? dataDirectory.resolve("backups") : backupDirectory;
     }
 
     public static ServerConfig fromArgs(String[] args) {
@@ -26,6 +92,13 @@ public record ServerConfig(String host, int port, Path dataDirectory, long defau
         int port = 8080;
         Path dataDirectory = Paths.get("data");
         long flushThresholdBytes = VectorDatabaseEngine.DEFAULT_FLUSH_THRESHOLD_BYTES;
+        Set<String> apiKeys = Set.of();
+        Path apiKeyFile = null;
+        int rateLimitPerMinute = 6_000;
+        int rateLimitBurst = 256;
+        long slowQueryThresholdMillis = 250L;
+        Path auditLogPath = null;
+        Path backupDirectory = null;
 
         for (String arg : args) {
             if (!arg.startsWith("--") || !arg.contains("=")) {
@@ -39,10 +112,39 @@ public record ServerConfig(String host, int port, Path dataDirectory, long defau
                 case "port" -> port = Integer.parseInt(value);
                 case "data-dir" -> dataDirectory = Paths.get(value);
                 case "default-flush-threshold-bytes" -> flushThresholdBytes = Long.parseLong(value);
+                case "api-keys" -> apiKeys = parseApiKeys(value);
+                case "api-key-file" -> apiKeyFile = Paths.get(value);
+                case "rate-limit-per-minute" -> rateLimitPerMinute = Integer.parseInt(value);
+                case "rate-limit-burst" -> rateLimitBurst = Integer.parseInt(value);
+                case "slow-query-threshold-ms" -> slowQueryThresholdMillis = Long.parseLong(value);
+                case "audit-log" -> auditLogPath = Paths.get(value);
+                case "backup-dir" -> backupDirectory = Paths.get(value);
                 default -> throw new IllegalArgumentException("Unknown argument: --" + key);
             }
         }
 
-        return new ServerConfig(host, port, dataDirectory, flushThresholdBytes);
+        return new ServerConfig(
+                host,
+                port,
+                dataDirectory,
+                flushThresholdBytes,
+                apiKeys,
+                apiKeyFile,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                slowQueryThresholdMillis,
+                auditLogPath,
+                backupDirectory
+        );
+    }
+
+    private static Set<String> parseApiKeys(String value) {
+        if (value.isBlank()) {
+            return Set.of();
+        }
+        return Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(token -> !token.isEmpty())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 }

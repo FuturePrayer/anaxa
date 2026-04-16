@@ -1,6 +1,6 @@
 # AnaxaDB
 
-AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版本已经具备可运行的单机服务形态，支持集合创建、向量写入、向量检索、Payload 精确过滤、WAL 持久化、段文件落盘以及重启恢复。
+AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版本已经具备可运行的单机服务形态，支持多租户 namespace、租户配额与限流、集合创建、向量写入、向量删除、基于 **HNSW + PQ** 的近似检索、持久化 ANN sidecar、Payload 倒排 + 列式过滤、查询缓存、内部阶段指标、API Key 热重载 + RBAC、审计日志、备份恢复、Prometheus 风格指标导出、JFR 事件、WAL/Segment checksum 校验、Compaction 以及重启恢复。
 
 当前代码以 Maven 多模块组织，核心目标是让网络接入、索引计算、存储持久化和查询编排彼此解耦，方便后续继续演进到更高性能和更完整的数据库能力。
 
@@ -11,17 +11,36 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版
 - 独立进程 HTTP 服务
 - 集合创建与集合列表/统计查询
 - 向量批量写入（同一 `id` 重复写入时以后写为准）
-- Top-K 检索
-- 基于 Payload 的精确等值过滤
+- 向量删除（Delete / Tombstone）
+- 基于 HNSW + PQ 的近似 Top-K 检索，并对小数据集自适应回退精确扫描
+- 持久化 Segment 级 HNSW / PQ / Payload 过滤索引 sidecar，降低冷启动重建成本
+- 基于 Payload 倒排索引 + 列式存储的增强过滤：精确匹配、`$in`、`$contains`、范围比较、布尔组合、嵌套字段
+- 多租户 namespace；不同 tenant 可复用相同 collection 名
+- 租户级 API Key 绑定、`X-Tenant-Id` 解析、collection/live vectors/storage/QPS 配额
 - `COSINE` 与 `L2` 两种距离度量
-- WAL 追加写入
+- WAL 逐条 checksum 校验
+- Segment footer checksum 校验
+- Tombstone 持久化与恢复
 - 基于阈值的异步 Flush
+- 手动 Compaction 与阈值触发的后台 Compaction
 - Immutable Segment 持久化
-- 重启后的 Segment/WAL 恢复
+- 截断/损坏 WAL 尾部恢复与隔离
+- Segment 损坏检测与可恢复场景下的自动回放
 - 基于虚拟线程的请求处理
 - 基于 Structured Concurrency 的多 Segment 并发检索
 - 基于 FFM `MemorySegment` 的堆外向量存储
 - 基于 Vector API 的 SIMD 距离计算
+- Source index cache + collection query cache
+- 近似检索 rerank 裁剪与 early-stop 风格候选截断
+- Prometheus 风格 `/metrics` 指标导出
+- HTTP/JFR 请求与检索事件、慢查询统计、直方图型延迟指标
+- Flush / Compaction / Search candidate pruning / rerank / cache 命中指标
+- 可选 API Key 鉴权
+- 基于文件的 API Key 热重载
+- Reader / Writer / Admin RBAC
+- 基于令牌桶的请求限流
+- JSON Lines 审计日志
+- Collection 级备份与恢复
 
 ## 2. 模块划分
 
@@ -30,10 +49,10 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版
 | 模块 | 作用 |
 | --- | --- |
 | `anaxa-common` | 通用模型、错误定义、JSON 工具、请求上下文 |
-| `anaxa-index` | 向量度量、Top-K 归并、SIMD Flat Searcher、索引抽象 |
-| `anaxa-storage` | Collection 目录布局、WAL、堆外 MemTable、Immutable Segment |
-| `anaxa-engine` | 集合生命周期、写入编排、异步 Flush、恢复、并发检索 |
-| `anaxa-server` | HTTP Server、参数解析、错误映射、可执行入口 |
+| `anaxa-index` | 向量度量、HNSW+PQ 搜索器、ANN sidecar 持久化、Payload 倒排/列式过滤、Top-K 归并 |
+| `anaxa-storage` | Collection 目录布局、带 checksum 的 WAL、堆外 MemTable、Immutable Segment |
+| `anaxa-engine` | 集合生命周期、租户隔离、写入编排、异步 Flush、恢复、并发检索 |
+| `anaxa-server` | HTTP Server、参数解析、指标导出、JFR 事件、鉴权、RBAC、租户解析、配额/限流、审计、备份恢复、错误映射、可执行入口 |
 
 ## 3. 当前系统架构
 
@@ -47,6 +66,7 @@ anaxa-server
   - jdk.httpserver
   - Virtual Threads
   - ScopedValue(RequestContext)
+  - API Key auth / RBAC / tenant policy / quotas / audit / backup-restore / metrics / JFR
     |
     v
 anaxa-engine
@@ -58,16 +78,17 @@ anaxa-engine
     |                        |
     v                        v
 anaxa-storage            anaxa-index
-  - WAL append/replay      - TopKAccumulator
+  - checksum WAL            - HnswPqSegmentIndexSearcher
   - OffHeapMemTable        - VectorMetricScorer
-  - ImmutableSegment       - FlatSegmentIndexSearcher
-  - mapped segment files
+  - ImmutableSegment       - PayloadFilterIndex
+  - segment sidecar ANN    - PayloadColumnStore
+  - mapped segment files   - PayloadFilterPlan
 ```
 
 ### 3.1 写入路径
 
 1. HTTP `POST /collections/{name}/vectors` 接收批量向量。
-2. 数据先追加到 `active.wal`。
+2. 数据先追加到 `active.wal`，每条 WAL 记录携带 checksum。
 3. 向量写入当前活跃的堆外 `MemTable`。
 4. 当 `MemTable` 估算大小超过阈值时：
    - 关闭当前 WAL
@@ -76,20 +97,42 @@ anaxa-storage            anaxa-index
    - 后台虚拟线程把冻结 MemTable 写成 `segment-*.seg`
    - Flush 成功后删除对应冻结 WAL
 
-### 3.2 检索路径
+### 3.2 删除与 Compaction 路径
+
+1. HTTP `POST /collections/{name}/deletions` 接收待删除的向量 ID 列表。
+2. 引擎为存在的 live ID 生成 tombstone 记录，并先写入 WAL。
+3. Tombstone 写入活跃 MemTable 后，旧版本向量会立即从检索结果中消失。
+4. 当 tombstone 被 Flush 到 Segment 后，系统可通过 `POST /collections/{name}/compact` 手动压实，或者在 Segment 数达到阈值后由后台自动压实。
+5. Compaction 会保留每个 ID 的最新 live 版本，并清理被 tombstone 覆盖的旧数据以及已经不再需要保留的 tombstone 记录。
+
+### 3.3 检索路径
 
 1. HTTP `POST /collections/{name}/search` 接收查询向量。
 2. 引擎收集当前活跃 MemTable、待 Flush MemTable、已落盘 Segments。
-3. 使用 `StructuredTaskScope` 并发检索每个数据源。
-4. 每个数据源内部执行 SIMD 加速的向量评分。
-5. 主线程归并所有局部 Top-K，返回最终结果。
+3. 查询先通过 Payload 倒排索引和列式范围索引缩小候选范围；小候选集走精确扫描，大候选集走 HNSW+PQ 近似召回。
+4. 近似召回后的候选会做 bounded rerank，并使用 SIMD 精确打分重新排序。
+5. collection 级 query cache 会缓存完全相同的查询请求；source index cache 会缓存 Segment/MemTable 的 ANN 与过滤 sidecar。
+6. 过滤表达式支持 `$and` / `$or` / `$not`、范围和数组包含，索引可命中的子句优先走倒排/列式候选生成，剩余子句再做逐条校验。
+7. 使用 `StructuredTaskScope` 并发检索每个数据源。
+8. 主线程归并所有局部 Top-K，返回最终结果，并把慢查询、query cache、source cache、candidate pruning、flush/compaction 指标写入观测面。
 
-### 3.3 持久化目录布局
+### 3.4 持久化目录布局
 
-每个 collection 在 `data-dir` 下有独立目录：
+默认 tenant 继续沿用兼容目录布局；非默认 tenant 写入 `tenants/{tenant}/collections/{collection}`：
 
 ```text
 {data-dir}/
+  audit/
+    audit.log
+  backups/
+    {backup-id}/
+      {collection-name}/
+        ...
+      tenants/
+        {tenant-id}/
+          collections/
+            {collection-name}/
+              ...
   {collection-name}/
     collection.json
     wal/
@@ -97,12 +140,29 @@ anaxa-storage            anaxa-index
       frozen-00000000000000000001.wal
     segments/
       segment-00000000000000000001.seg
+      segment-00000000000000000001.seg.ann
+    quarantine/
+      active.wal.wal-recovered
+  tenants/
+    {tenant-id}/
+      collections/
+        {collection-name}/
+          collection.json
+          wal/
+            active.wal
+          segments/
+            segment-00000000000000000001.seg
+            segment-00000000000000000001.seg.ann
 ```
 
 - `collection.json`：集合元数据
 - `active.wal`：当前正在追加的 WAL
 - `frozen-*.wal`：等待后台 Flush 完成后删除的 WAL
-- `segment-*.seg`：不可变段文件
+- `segment-*.seg`：带 footer checksum 的不可变段文件
+- `segment-*.seg.ann`：Segment 对应的 HNSW / PQ / Payload 过滤 sidecar
+- `quarantine/`：恢复过程中被隔离的损坏/被替换文件
+- `audit/audit.log`：JSON Lines 审计日志
+- `backups/{backup-id}/...`：逻辑备份目录
 
 ## 4. 部署说明
 
@@ -153,7 +213,14 @@ java --enable-preview --add-modules jdk.incubator.vector `
   --host=0.0.0.0 `
   --port=8080 `
   --data-dir=D:\anaxa-data `
-  --default-flush-threshold-bytes=67108864
+  --default-flush-threshold-bytes=67108864 `
+  --api-keys=prod-secret-1,prod-secret-2 `
+  --api-key-file=D:\anaxa-config\api-keys.json `
+  --rate-limit-per-minute=6000 `
+  --rate-limit-burst=256 `
+  --slow-query-threshold-ms=250 `
+  --audit-log=D:\anaxa-data\audit\audit.log `
+  --backup-dir=D:\anaxa-data\backups
 ```
 
 ### 4.4 启动参数
@@ -164,6 +231,13 @@ java --enable-preview --add-modules jdk.incubator.vector `
 | `--port` | `8080` | 监听端口 |
 | `--data-dir` | `data` | 数据目录 |
 | `--default-flush-threshold-bytes` | `67108864` | collection 默认 Flush 阈值，单位字节 |
+| `--api-keys` | 空 | 静态 API Key 列表，逗号分隔；配置后除 `/health` 外都需要鉴权，且这些 key 默认拥有全部权限 |
+| `--api-key-file` | 空 | 可选 JSON 文件，支持 API Key + 角色（`READER`/`WRITER`/`ADMIN`）热重载 |
+| `--rate-limit-per-minute` | `6000` | 每个 principal / remote address 的每分钟请求额度，`0` 表示关闭 |
+| `--rate-limit-burst` | `256` | 令牌桶突发容量 |
+| `--slow-query-threshold-ms` | `250` | 慢查询阈值；`0` 表示关闭慢查询标记 |
+| `--audit-log` | `{data-dir}\audit\audit.log` | 审计日志输出位置 |
+| `--backup-dir` | `{data-dir}\backups` | 逻辑备份目录 |
 
 ## 5. 使用说明
 
@@ -172,8 +246,11 @@ java --enable-preview --add-modules jdk.incubator.vector `
 1. 启动服务
 2. 创建 collection
 3. 批量写入向量
-4. 发起搜索请求
-5. 查看集合统计与健康状态
+4. 按需删除向量
+5. 发起搜索请求
+6. 在需要时触发 compaction
+7. 按需执行备份与恢复
+8. 查看集合统计、指标、审计与健康状态
 
 ### 5.2 支持的度量类型
 
@@ -192,6 +269,69 @@ X-Trace-Id: <trace-id>
 
 如果请求头里传入了 `X-Trace-Id`，服务会透传；否则服务端自动生成。
 
+如果启动时配置了 `--api-keys`，则除 `GET /health` 外其余接口都要求：
+
+```text
+X-API-Key: <your-key>
+```
+
+或：
+
+```text
+Authorization: Bearer <your-key>
+```
+
+如果使用 `--api-key-file`，文件格式示例如下：
+
+```json
+{
+  "keys": [
+    {
+      "id": "reader-bot",
+      "secret": "reader-secret",
+      "roles": ["READER"],
+      "tenant": "team-a"
+    },
+    {
+      "id": "ops-admin",
+      "secret": "admin-secret",
+      "roles": ["ADMIN"],
+      "globalTenantAccess": true
+    }
+  ],
+  "tenants": [
+    {
+      "id": "team-a",
+      "maxCollections": 32,
+      "maxLiveVectors": 5000000,
+      "maxStorageBytes": 21474836480,
+      "rateLimitPerMinute": 12000,
+      "rateLimitBurst": 512
+    }
+  ]
+}
+```
+
+服务会按文件修改时间自动重载该文件。当前路由权限模型如下：
+
+| 角色 | 可访问能力 |
+| --- | --- |
+| `READER` | 读集合、搜索、查看统计 |
+| `WRITER` | 创建集合、写入、删除；同时具备 `READER` 能力 |
+| `ADMIN` | `WRITER` 全部能力，以及 `/metrics`、compaction、备份与恢复 |
+
+`X-Tenant-Id` 为可选请求头：
+
+```text
+X-Tenant-Id: <tenant-id>
+```
+
+租户解析规则：
+
+1. 未开启鉴权时：普通 collection 路由默认落到 `default` tenant；`GET /collections` 和 `GET /metrics` 不带该头时返回所有 tenant 视图。
+2. 使用 tenant 绑定 API Key 时：不带 `X-Tenant-Id` 时自动落到该 key 绑定 tenant；如果显式指定，则必须与绑定 tenant 一致。
+3. 使用 `globalTenantAccess=true` 的全局 key 时：collection 级操作不带 `X-Tenant-Id` 时默认落到 `default` tenant；`GET /collections` 和 `GET /metrics` 不带该头时返回所有 tenant 视图。
+
 ### 6.1 健康检查
 
 **GET** `/health`
@@ -204,7 +344,72 @@ X-Trace-Id: <trace-id>
 }
 ```
 
-### 6.2 创建集合
+### 6.2 指标导出
+
+**GET** `/metrics`
+
+如果携带 `X-Tenant-Id`，则 collection / search / flush / compaction 类指标会按该 tenant 视图输出；tenant 绑定 admin key 在不带该头时默认返回自身 tenant 视图，全局 admin key 不带该头时返回所有 tenant 聚合视图。
+
+返回 Prometheus 文本格式指标，包含：
+
+- `anaxa_http_requests_total`
+- `anaxa_http_request_duration_seconds_bucket`
+- `anaxa_http_request_duration_seconds_sum`
+- `anaxa_http_request_duration_seconds_count`
+- `anaxa_http_auth_failures_total`
+- `anaxa_http_authorization_denied_total`
+- `anaxa_http_rate_limited_total`
+- `anaxa_search_queries_total`
+- `anaxa_search_slow_queries_total`
+- `anaxa_search_hits_total`
+- `anaxa_search_duration_seconds_sum`
+- `anaxa_search_duration_seconds_count`
+- `anaxa_engine_flush_total`
+- `anaxa_engine_flush_duration_seconds_sum`
+- `anaxa_engine_flush_duration_seconds_count`
+- `anaxa_engine_compaction_total`
+- `anaxa_engine_compaction_duration_seconds_sum`
+- `anaxa_engine_compaction_duration_seconds_count`
+- `anaxa_search_sources_total`
+- `anaxa_search_source_queries_total{mode="exact|approximate"}`
+- `anaxa_search_filter_candidates_total`
+- `anaxa_search_approximate_candidates_total`
+- `anaxa_search_reranked_candidates_total`
+- `anaxa_search_scored_candidates_total`
+- `anaxa_search_graph_visited_total`
+- `anaxa_search_source_index_cache_hits_total`
+- `anaxa_search_source_index_cache_misses_total`
+- `anaxa_search_query_cache_hits_total`
+- `anaxa_search_query_cache_misses_total`
+- `anaxa_engine_collections`
+- `anaxa_engine_live_vectors`
+- `anaxa_engine_tombstones`
+- `anaxa_engine_segments`
+- `anaxa_engine_storage_bytes`
+- `anaxa_engine_collection_live_vectors`
+- `anaxa_engine_collection_storage_bytes`
+
+collection / search / flush / compaction 指标都带 `tenant` 和 `collection` label。
+
+响应示例：
+
+```text
+# TYPE anaxa_http_requests_total counter
+anaxa_http_requests_total{method="POST",route="/collections",status="201"} 1
+# TYPE anaxa_search_queries_total counter
+anaxa_search_queries_total{collection="docs",tenant="team-a"} 3
+# TYPE anaxa_engine_flush_total counter
+anaxa_engine_flush_total{collection="docs",tenant="team-a"} 1
+# TYPE anaxa_engine_collections gauge
+anaxa_engine_collections 1
+```
+
+如果启用了 JFR，可额外观察：
+
+- `cn.suhoan.anaxa.HttpRequest`
+- `cn.suhoan.anaxa.Search`
+
+### 6.3 创建集合
 
 **POST** `/collections`
 
@@ -238,14 +443,24 @@ X-Trace-Id: <trace-id>
   "dimension": 3,
   "metric": "COSINE",
   "liveVectorCount": 0,
+  "tombstoneCount": 0,
   "segmentCount": 0,
-  "flushInProgress": false
+  "flushInProgress": false,
+  "compactionInProgress": false,
+  "tenantId": "default",
+  "storageBytes": 0
 }
 ```
 
-### 6.3 查询所有集合
+### 6.4 查询所有集合
 
 **GET** `/collections`
+
+行为说明：
+
+- tenant 绑定 key 默认只返回其所属 tenant 的集合
+- 全局 key 在不带 `X-Tenant-Id` 时返回所有 tenant 的集合，带上该头时只返回指定 tenant
+- 未开启鉴权时，不带 `X-Tenant-Id` 也返回所有 tenant 的集合
 
 响应示例：
 
@@ -256,13 +471,17 @@ X-Trace-Id: <trace-id>
     "dimension": 3,
     "metric": "COSINE",
     "liveVectorCount": 2,
+    "tombstoneCount": 0,
     "segmentCount": 1,
-    "flushInProgress": false
+    "flushInProgress": false,
+    "compactionInProgress": false,
+    "tenantId": "default",
+    "storageBytes": 16384
   }
 ]
 ```
 
-### 6.4 查询单个集合状态
+### 6.5 查询单个集合状态
 
 **GET** `/collections/{name}`
 
@@ -274,12 +493,16 @@ X-Trace-Id: <trace-id>
   "dimension": 3,
   "metric": "COSINE",
   "liveVectorCount": 2,
+  "tombstoneCount": 0,
   "segmentCount": 1,
-  "flushInProgress": false
+  "flushInProgress": false,
+  "compactionInProgress": false,
+  "tenantId": "default",
+  "storageBytes": 16384
 }
 ```
 
-### 6.5 批量写入向量
+### 6.6 批量写入向量
 
 **POST** `/collections/{name}/vectors`
 
@@ -327,12 +550,91 @@ X-Trace-Id: <trace-id>
   "dimension": 3,
   "metric": "COSINE",
   "liveVectorCount": 2,
+  "tombstoneCount": 0,
   "segmentCount": 0,
-  "flushInProgress": false
+  "flushInProgress": false,
+  "compactionInProgress": false,
+  "tenantId": "default",
+  "storageBytes": 256
 }
 ```
 
-### 6.6 向量检索
+### 6.7 删除向量
+
+**POST** `/collections/{name}/deletions`
+
+请求体：
+
+```json
+{
+  "ids": ["alpha", "beta"]
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `ids` | 是 | 待删除向量 ID 列表，不能为空 |
+
+行为说明：
+
+- 仅对当前仍然是 live 状态的 ID 生成 tombstone
+- 已删除或不存在的 ID 会被忽略
+- 删除后旧向量会立刻从检索结果中消失
+
+成功响应：`200 OK`
+
+响应内容为该集合最新统计：
+
+```json
+{
+  "name": "docs",
+  "dimension": 3,
+  "metric": "COSINE",
+  "liveVectorCount": 1,
+  "tombstoneCount": 1,
+  "segmentCount": 0,
+  "flushInProgress": false,
+  "compactionInProgress": false,
+  "tenantId": "default",
+  "storageBytes": 320
+}
+```
+
+### 6.8 手动触发 Compaction
+
+**POST** `/collections/{name}/compact`
+
+该接口不需要请求体，用于把当前所有持久化 Segment 做一次手动压实。
+
+行为说明：
+
+- 保留每个 ID 的最新 live 版本
+- 清理已被覆盖的旧版本
+- 清理已经不再需要保留的 tombstone
+- 如果 collection 的持久化 Segment 少于 2 个，则该操作为 no-op
+
+成功响应：`200 OK`
+
+响应内容为压实后的集合统计：
+
+```json
+{
+  "name": "docs",
+  "dimension": 3,
+  "metric": "COSINE",
+  "liveVectorCount": 1,
+  "tombstoneCount": 0,
+  "segmentCount": 1,
+  "flushInProgress": false,
+  "compactionInProgress": false,
+  "tenantId": "default",
+  "storageBytes": 12288
+}
+```
+
+### 6.9 向量检索
 
 **POST** `/collections/{name}/search`
 
@@ -354,7 +656,36 @@ X-Trace-Id: <trace-id>
 | --- | --- | --- |
 | `vector` | 是 | 查询向量 |
 | `topK` | 是 | 返回结果数量，必须大于 0 |
-| `filter` | 否 | Payload 精确等值过滤；当前仅支持扁平键值的完全匹配 |
+| `filter` | 否 | Payload 过滤表达式；支持精确匹配、嵌套字段、`$in`、`$contains`、`$gt`/`$gte`/`$lt`/`$lte`、`$and`/`$or`/`$not` |
+
+过滤表达式示例：
+
+```json
+{
+  "filter": {
+    "$and": [
+      { "tenant": { "$in": ["blue", "green"] } },
+      { "meta.priority": { "$gte": 5, "$lt": 10 } },
+      { "tags": { "$contains": "featured" } },
+      {
+        "$or": [
+          { "meta.region": "eu" },
+          { "meta.region": "apac" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+行为说明：
+
+- 顶层直接写 `{ "tenant": "blue" }` 仍然表示等值匹配，兼容旧请求
+- 嵌套对象可用点路径，例如 `meta.region`
+- `$contains` 适用于数组字段，也支持字符串包含
+- `$in` / 等值 / 部分数组包含子句会优先命中倒排索引
+- 标量范围子句会优先命中列式候选裁剪
+- 大候选集会走 HNSW+PQ 近似召回，小候选集会自动回退精确扫描；近似路径会做有界 rerank
 
 成功响应：`200 OK`
 
@@ -394,6 +725,84 @@ X-Trace-Id: <trace-id>
 | `payload` | 写入时附带的元数据 |
 | `sequence` | 系统内部序列号，越大表示写入越新 |
 
+### 6.10 备份集合
+
+**POST** `/collections/{name}/backup`
+
+请求体：
+
+```json
+{
+  "backupId": "nightly-001"
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `backupId` | 是 | 备份标识；最终输出到 `{backup-dir}\{backupId}` 下当前 tenant 作用域对应的 collection 目录 |
+
+行为说明：
+
+- 只支持对当前没有待处理 Flush / Compaction 的 collection 执行备份
+- 备份会复制 `collection.json`、Segment、ANN sidecar 和当前 MemTable 的 WAL 快照
+
+成功响应：`200 OK`
+
+响应内容为原 collection 当前统计。
+
+### 6.11 从备份恢复集合
+
+**POST** `/backups/{backupId}/restore`
+
+请求体：
+
+```json
+{
+  "sourceCollection": "docs",
+  "collectionName": "docs-restored"
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `sourceCollection` | 是 | 备份目录中的源集合名 |
+| `collectionName` | 是 | 恢复后的新集合名 |
+
+行为说明：
+
+- 恢复会把当前 tenant 作用域下的备份目录复制回 `data-dir`
+- 恢复后的 collection 会重新加载 WAL / Segment / sidecar，并立即可搜索
+- 目标集合名必须不存在
+
+成功响应：`201 Created`
+
+响应内容为恢复后集合统计。
+
+集合统计字段补充说明：
+
+| 字段 | 说明 |
+| --- | --- |
+| `liveVectorCount` | 当前仍然可检索的 live 向量数量 |
+| `tombstoneCount` | 当前仍被保留、尚未被压实清理的 tombstone 数量 |
+| `segmentCount` | 持久化 Segment 数量 |
+| `flushInProgress` | 是否存在正在执行的 Flush |
+| `compactionInProgress` | 是否存在正在执行的 Compaction |
+| `tenantId` | collection 所属 tenant |
+| `storageBytes` | 当前 collection 估算占用字节数（MemTable + WAL + Segment + sidecar） |
+
+文件恢复行为补充说明：
+
+| 场景 | 当前行为 |
+| --- | --- |
+| `active.wal` 尾部截断/损坏 | 回放有效前缀，隔离原文件，并重写干净的 `active.wal` |
+| `frozen-*.wal` 尾部截断/损坏 | 回放有效前缀，隔离原文件，并将恢复结果并入新的 `active.wal` |
+| `segment-*.seg` checksum 不匹配且有同代 WAL | 隔离损坏 segment，使用 frozen WAL 恢复 |
+| `segment-*.seg` checksum 不匹配且无可恢复 WAL | 启动失败，避免静默丢数 |
+
 ## 7. 错误响应
 
 错误时统一返回：
@@ -409,7 +818,11 @@ X-Trace-Id: <trace-id>
 
 | 状态码 | 场景 |
 | --- | --- |
-| `400` | 参数错误、请求体为空、维度不匹配、`topK <= 0`、非法集合名 |
+| `400` | 参数错误、请求体为空、维度不匹配、`topK <= 0`、非法集合名、Compaction 已在执行、备份时 collection 仍有待处理 Flush/Compaction |
+| `401` | API Key 缺失或无效 |
+| `403` | API Key 有效但角色权限不足，或 tenant 访问越权 |
+| `429` | 请求超过限流阈值 |
+| `409` | 租户配额超限（如 maxCollections / maxLiveVectors / maxStorageBytes）或目标恢复集合已存在 |
 | `404` | collection 不存在或接口路径不存在 |
 | `405` | HTTP 方法不允许 |
 | `500` | 内部异常，例如后台 Flush 失败等 |
@@ -424,6 +837,7 @@ X-Trace-Id: <trace-id>
 curl -X POST "http://127.0.0.1:8080/collections" \
   -H "Content-Type: application/json" \
   -H "X-Trace-Id: demo-create-001" \
+  -H "X-API-Key: prod-secret-1" \
   -d '{
     "name": "docs",
     "dimension": 3,
@@ -432,11 +846,18 @@ curl -X POST "http://127.0.0.1:8080/collections" \
   }'
 ```
 
+如果需要显式落到某个 tenant，可额外带上：
+
+```bash
+-H "X-Tenant-Id: team-a"
+```
+
 ### 8.2 写入向量
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: prod-secret-1" \
   -d '{
     "vectors": [
       {
@@ -472,6 +893,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
 ```bash
 curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: prod-secret-1" \
   -d '{
     "vector": [1.0, 0.0, 0.0],
     "topK": 2,
@@ -508,16 +930,84 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
 }
 ```
 
-### 8.4 查询健康状态
+### 8.4 复杂过滤检索
+
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: reader-secret" \
+  -d '{
+    "vector": [1.0, 0.0, 0.0],
+    "topK": 5,
+    "filter": {
+      "$and": [
+        { "tenant": { "$in": ["blue", "green"] } },
+        { "meta.priority": { "$gte": 5, "$lt": 10 } },
+        { "tags": { "$contains": "featured" } }
+      ]
+    }
+  }'
+```
+
+### 8.5 删除向量
+
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/deletions" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: prod-secret-1" \
+  -d '{
+    "ids": ["beta"]
+  }'
+```
+
+### 8.6 手动触发 Compaction
+
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/compact" \
+  -H "X-API-Key: prod-secret-1"
+```
+
+### 8.7 查询健康状态
 
 ```bash
 curl "http://127.0.0.1:8080/health"
 ```
 
-### 8.5 查询集合统计
+### 8.8 查询集合统计
 
 ```bash
-curl "http://127.0.0.1:8080/collections/docs"
+curl "http://127.0.0.1:8080/collections/docs" \
+  -H "X-API-Key: prod-secret-1"
+```
+
+### 8.9 查询 Prometheus 指标
+
+```bash
+curl "http://127.0.0.1:8080/metrics" \
+  -H "X-API-Key: admin-secret"
+```
+
+### 8.10 执行备份
+
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/backup" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: admin-secret" \
+  -d '{
+    "backupId": "nightly-001"
+  }'
+```
+
+### 8.11 从备份恢复到新集合
+
+```bash
+curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: admin-secret" \
+  -d '{
+    "sourceCollection": "docs",
+    "collectionName": "docs-restored"
+  }'
 ```
 
 ## 9. 当前实现与架构愿景的差距
@@ -532,50 +1022,38 @@ curl "http://127.0.0.1:8080/collections/docs"
 - 基于 Vector API 的 SIMD 打分
 - 基于 Structured Concurrency 的并发检索
 - 基于 Virtual Threads 的高并发请求模型
+- HNSW + PQ 近似搜索
+- 持久化 HNSW / PQ / Payload 索引 sidecar
+- 增强型 Payload 过滤表达式 + 列式范围候选裁剪
+- 多租户 namespace、tenant 配额、tenant 级限流
+- API Key 鉴权、热重载、RBAC、限流与审计
+- Prometheus 指标、JFR 事件、慢查询统计与内部阶段指标
+- 逻辑备份与恢复
+- WAL / Segment checksum 校验与恢复策略
 
 ### 9.2 还未实现但值得优先补齐
 
-1. **HNSW / PQ 真正索引化**  
-   当前检索器仍是 Flat Scan，结构已经可插拔，但还没有把 HNSW、量化压缩和图导航真正接入。
-
-2. **Compaction 与多层段合并**  
-   现在只有 Flush，没有后台 Compaction；随着 Segment 增多，查询成本会逐步升高。
-
-3. **删除与墓碑机制**  
-   当前支持 upsert 覆盖，但没有 delete API 和 tombstone。
-
-4. **更强过滤能力**  
-   当前仅支持扁平 Payload 的精确等值匹配，不支持范围、布尔表达式、数组和倒排索引。
-
-5. **更完整的 WAL/段格式版本化**  
-   目前文件格式简单直接，后续需要 checksum、版本升级策略、损坏检测和更严格的恢复策略。
-
-6. **可观测性**  
-   当前还缺少指标、审计日志、JFR 事件、慢查询采样和 Prometheus 导出。
-
-7. **运维能力**  
-   当前没有鉴权、租户隔离、限流、配置热更新、备份恢复工具和管理接口。
-
-8. **性能优化**  
+1. **更激进的性能优化**  
    还可以继续做：
    - 批量写入零拷贝解析
-   - Payload 列式存储
-   - 搜索 early-stop
    - Segment 级缓存与预取
    - 更细粒度的并发调度
+   - 自适应 `efSearch` / rerank 窗口调优
 
-9. **分布式能力**  
+2. **分布式能力**  
    当前是单机架构，没有副本、分片、Raft、一致性协议和跨节点 scatter-gather。
 
-10. **Valhalla 值类接入**  
-    架构设计里提到的值类候选节点结构还没有落地；后续可在索引层替换当前候选对象模型。
+3. **Valhalla 值类接入**  
+   架构设计里提到的值类候选节点结构还没有落地；后续可在索引层替换当前候选对象模型。
+
+4. **运维与数据生命周期能力**  
+   还缺少 snapshot 调度、冷热分层、备份保留策略、后台 compaction policy 调优和更完整的租户运维接口。
 
 ## 10. 建议的下一步演进顺序
 
 如果要继续把当前实现推进到更接近生产可用，建议按下面顺序演进：
 
-1. 先补 **Compaction + Delete/Tombstone**
-2. 再接入 **HNSW**，替换 Flat Search
-3. 增加 **可观测性、限流、鉴权**
-4. 优化 **Payload 过滤索引**
-5. 最后再推进 **分布式与副本能力**
+1. 继续推进 **零拷贝写入、Segment 预取和更自适应的 ANN 参数调优**
+2. 再补 **Snapshot 调度、冷热分层和更完整的后台数据生命周期管理**
+3. 然后演进 **分布式、副本与一致性能力**
+4. 最后评估 **Valhalla 值类** 对候选节点与 Top-K 结构的替换收益

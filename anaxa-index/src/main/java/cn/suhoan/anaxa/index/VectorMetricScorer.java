@@ -39,6 +39,19 @@ public final class VectorMetricScorer {
         };
     }
 
+    public static float score(
+            MetricType metric,
+            float[] queryVector,
+            float queryNorm,
+            float[] candidateVector,
+            float candidateNorm
+    ) {
+        return switch (metric) {
+            case COSINE -> cosine(queryVector, queryNorm, candidateVector, candidateNorm);
+            case L2 -> -l2Squared(queryVector, candidateVector);
+        };
+    }
+
     private static float cosine(
             float[] queryVector,
             float queryNorm,
@@ -50,6 +63,18 @@ public final class VectorMetricScorer {
             return 0.0F;
         }
         return dot(queryVector, candidateSegment, candidateOffsetBytes) / (queryNorm * candidateNorm);
+    }
+
+    private static float cosine(
+            float[] queryVector,
+            float queryNorm,
+            float[] candidateVector,
+            float candidateNorm
+    ) {
+        if (queryNorm == 0.0F || candidateNorm == 0.0F) {
+            return 0.0F;
+        }
+        return dot(queryVector, candidateVector) / (queryNorm * candidateNorm);
     }
 
     private static float l2Squared(float[] queryVector, MemorySegment candidateSegment, long candidateOffsetBytes) {
@@ -104,6 +129,23 @@ public final class VectorMetricScorer {
                     FLOAT_LAYOUT,
                     candidateOffsetBytes + (long) index * Float.BYTES
             );
+        }
+        return sum;
+    }
+
+    private static float l2Squared(float[] left, float[] right) {
+        float sum = 0.0F;
+        for (int index = 0; index < left.length; index++) {
+            float delta = left[index] - right[index];
+            sum += delta * delta;
+        }
+        return sum;
+    }
+
+    private static float dot(float[] left, float[] right) {
+        float sum = 0.0F;
+        for (int index = 0; index < left.length; index++) {
+            sum += left[index] * right[index];
         }
         return sum;
     }

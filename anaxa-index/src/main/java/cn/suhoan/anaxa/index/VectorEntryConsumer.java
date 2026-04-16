@@ -8,6 +8,7 @@ public interface VectorEntryConsumer {
     void accept(
             String id,
             long sequence,
+            boolean tombstone,
             float norm,
             MemorySegment vectorSegment,
             long vectorOffsetBytes,
