@@ -1,8 +1,13 @@
 package cn.suhoan.anaxa.server;
 
 import cn.suhoan.anaxa.common.json.JsonSupport;
+import cn.suhoan.anaxa.common.model.BackupSummary;
 import cn.suhoan.anaxa.common.model.CollectionStats;
 import cn.suhoan.anaxa.common.model.SearchResponse;
+import cn.suhoan.anaxa.common.model.TenantSnapshotResult;
+import cn.suhoan.anaxa.common.model.TenantStats;
+import cn.suhoan.anaxa.common.model.UpsertVector;
+import cn.suhoan.anaxa.common.util.BinaryVectorStreams;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -178,6 +183,151 @@ class AnaxaHttpServerTest {
     }
 
     @Test
+    void supportsBinaryBulkIngestAndTenantLifecycleOperations() throws Exception {
+        Path dataDir = tempDir.resolve("http-binary-snapshot");
+        Path apiKeyFile = tempDir.resolve("snapshot-api-keys.json");
+        Path backupDir = tempDir.resolve("backups");
+        Files.writeString(apiKeyFile, JsonSupport.writeString(Map.of(
+                "keys", List.of(
+                        Map.of("id", "writer-a", "secret", "writer-a-key", "roles", List.of("WRITER"), "tenant", "tenant-a"),
+                        Map.of("id", "admin-a", "secret", "admin-a-key", "roles", List.of("ADMIN"), "tenant", "tenant-a"),
+                        Map.of("id", "global-admin", "secret", "global-admin-key", "roles", List.of("ADMIN"), "globalTenantAccess", true)
+                ),
+                "tenants", List.of(
+                        Map.of("id", "tenant-a", "rateLimitPerMinute", 10_000, "rateLimitBurst", 100)
+                )
+        )));
+
+        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig(
+                "127.0.0.1",
+                0,
+                dataDir,
+                1_000_000L,
+                Set.of(),
+                apiKeyFile,
+                10_000,
+                100,
+                0L,
+                dataDir.resolve("audit").resolve("audit.log"),
+                backupDir,
+                1L,
+                1
+        ))) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.port();
+
+            assertEquals(201, sendJson(
+                    client,
+                    baseUrl + "/collections",
+                    "POST",
+                    Map.of("name", "docs", "dimension", 3, "metric", "COSINE", "flushThresholdBytes", 1_000_000),
+                    "writer-a-key"
+            ).statusCode());
+
+            byte[] firstBatch = BinaryVectorStreams.writeBatch(3, List.of(
+                    new UpsertVector("alpha", new float[]{1.0F, 0.0F, 0.0F}, Map.of("kind", "guide")),
+                    new UpsertVector("beta", new float[]{0.0F, 1.0F, 0.0F}, Map.of("kind", "faq"))
+            ));
+            HttpResponse<String> firstBinaryUpsert = sendBinaryBody(
+                    client,
+                    baseUrl + "/collections/docs/vectors",
+                    "POST",
+                    firstBatch,
+                    "application/vnd.anaxa.vector-batch",
+                    "writer-a-key",
+                    null
+            );
+            assertEquals(200, firstBinaryUpsert.statusCode());
+
+            SearchResponse firstSearch = JsonSupport.mapper().readValue(sendJson(
+                    client,
+                    baseUrl + "/collections/docs/search",
+                    "POST",
+                    Map.of("vector", List.of(1.0F, 0.0F, 0.0F), "topK", 10, "filter", Map.of()),
+                    "writer-a-key"
+            ).body(), SearchResponse.class);
+            assertEquals("alpha", firstSearch.hits().getFirst().id());
+
+            waitFor(() -> listBackupIds(backupDir).size() == 1, "first automatic snapshot did not complete");
+            String firstBackupId = listBackupIds(backupDir).getFirst();
+
+            byte[] secondBatch = BinaryVectorStreams.writeBatch(3, List.of(
+                    new UpsertVector("gamma", new float[]{0.0F, 0.0F, 1.0F}, Map.of("kind", "note"))
+            ));
+            HttpResponse<String> secondBinaryUpsert = sendBinaryBody(
+                    client,
+                    baseUrl + "/collections/docs/vectors",
+                    "POST",
+                    secondBatch,
+                    "application/vnd.anaxa.vector-batch",
+                    "writer-a-key",
+                    null
+            );
+            assertEquals(200, secondBinaryUpsert.statusCode());
+
+            waitFor(() -> {
+                List<String> backupIds = listBackupIds(backupDir);
+                return backupIds.size() == 1 && !backupIds.contains(firstBackupId);
+            }, "snapshot retention did not rotate the automatic backup");
+
+            HttpRequest tenantInfoRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/tenants/tenant-a"))
+                    .header("X-API-Key", "admin-a-key")
+                    .GET()
+                    .build();
+            HttpResponse<String> tenantInfoResponse = client.send(tenantInfoRequest, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, tenantInfoResponse.statusCode());
+            TenantStats tenantStats = JsonSupport.mapper().readValue(tenantInfoResponse.body(), TenantStats.class);
+            assertEquals("tenant-a", tenantStats.tenantId());
+            assertEquals(1, tenantStats.collectionCount());
+            assertEquals(3L, tenantStats.liveVectorCount());
+            assertTrue(tenantStats.backupCount() >= 1);
+
+            HttpRequest backupsRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/backups"))
+                    .header("X-API-Key", "admin-a-key")
+                    .GET()
+                    .build();
+            HttpResponse<String> backupsResponse = client.send(backupsRequest, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, backupsResponse.statusCode());
+            List<BackupSummary> backups = JsonSupport.mapper().readerForListOf(BackupSummary.class).readValue(backupsResponse.body());
+            assertEquals(1, backups.size());
+            assertEquals("tenant-a", backups.getFirst().stats().tenantId());
+            assertEquals("docs", backups.getFirst().stats().name());
+
+            HttpResponse<String> manualSnapshotResponse = sendJson(
+                    client,
+                    baseUrl + "/tenants/tenant-a/snapshot",
+                    "POST",
+                    Map.of("backupId", "manual-tenant-a"),
+                    "admin-a-key"
+            );
+            assertEquals(200, manualSnapshotResponse.statusCode());
+            TenantSnapshotResult manualSnapshot = JsonSupport.mapper().readValue(manualSnapshotResponse.body(), TenantSnapshotResult.class);
+            assertEquals("manual-tenant-a", manualSnapshot.backupId());
+            assertEquals(1, manualSnapshot.collections().size());
+            assertEquals("docs", manualSnapshot.collections().getFirst().stats().name());
+
+            HttpRequest tenantsRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/tenants"))
+                    .header("X-API-Key", "global-admin-key")
+                    .GET()
+                    .build();
+            HttpResponse<String> tenantsResponse = client.send(tenantsRequest, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, tenantsResponse.statusCode());
+            List<TenantStats> tenants = JsonSupport.mapper().readerForListOf(TenantStats.class).readValue(tenantsResponse.body());
+            assertTrue(tenants.stream().anyMatch(summary -> summary.tenantId().equals("tenant-a") && summary.backupCount() >= 2));
+
+            HttpRequest metricsRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/metrics"))
+                    .header("X-API-Key", "admin-a-key")
+                    .GET()
+                    .build();
+            HttpResponse<String> metrics = client.send(metricsRequest, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, metrics.statusCode());
+            assertTrue(metrics.body().contains("anaxa_lifecycle_snapshot_total{collection=\"docs\",tenant=\"tenant-a\"}"));
+            assertTrue(metrics.body().contains("anaxa_lifecycle_snapshot_retention_deletes_total{collection=\"docs\",tenant=\"tenant-a\"}"));
+        }
+    }
+
+    @Test
     void servesDeleteAndCompactionEndpoints() throws Exception {
         try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-delete"), 1L))) {
             server.start();
@@ -213,7 +363,9 @@ class AnaxaHttpServerTest {
             assertEquals(200, delete.statusCode());
 
             waitForCollectionStats(client, baseUrl, stats ->
-                            stats.segmentCount() == 2 || (stats.segmentCount() == 0 && stats.tombstoneCount() == 0L),
+                            !stats.flushInProgress()
+                                    && !stats.compactionInProgress()
+                                    && (stats.segmentCount() == 2 || (stats.segmentCount() == 0 && stats.tombstoneCount() == 0L)),
                     "tombstone flush or auto compaction did not complete");
 
             HttpResponse<String> compact = sendJson(
@@ -817,6 +969,27 @@ class AnaxaHttpServerTest {
         return client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> sendBinaryBody(
+            HttpClient client,
+            String uri,
+            String method,
+            byte[] body,
+            String contentType,
+            String apiKey,
+            String tenantId
+    ) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(uri))
+                .header("Content-Type", contentType);
+        if (apiKey != null) {
+            builder.header("X-API-Key", apiKey);
+        }
+        if (tenantId != null) {
+            builder.header("X-Tenant-Id", tenantId);
+        }
+        builder.method(method, HttpRequest.BodyPublishers.ofByteArray(body));
+        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
     private CollectionStats collectionStats(HttpClient client, String baseUrl) throws Exception {
         return collectionStats(client, baseUrl, "docs", null, null);
     }
@@ -879,5 +1052,19 @@ class AnaxaHttpServerTest {
             Thread.sleep(25L);
         }
         fail(message);
+    }
+
+    private List<String> listBackupIds(Path backupDir) {
+        if (!Files.isDirectory(backupDir)) {
+            return List.of();
+        }
+        try (var backups = Files.list(backupDir)) {
+            return backups.filter(Files::isDirectory)
+                    .map(path -> path.getFileName().toString())
+                    .sorted()
+                    .toList();
+        } catch (Exception exception) {
+            throw new RuntimeException(exception);
+        }
     }
 }

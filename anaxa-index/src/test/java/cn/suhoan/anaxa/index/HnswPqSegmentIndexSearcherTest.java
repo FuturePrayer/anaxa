@@ -62,6 +62,28 @@ class HnswPqSegmentIndexSearcherTest {
         }
     }
 
+    @Test
+    void evictsColdSourcesWhenCacheBudgetIsExceeded() {
+        float[] target = targetVector();
+        SearchRequest request = new SearchRequest(target, 10, Map.of());
+
+        try (HnswPqSegmentIndexSearcher searcher = new HnswPqSegmentIndexSearcher(120_000L, 1)) {
+            TestSource first = approximateSource("approximate-source-a", target);
+            TestSource second = approximateSource("approximate-source-b", target);
+
+            assertFalse(searcher.search(first, request, (id, sequence) -> true).metrics().indexCacheHit());
+            assertEquals(1, searcher.cachedSourceCount());
+
+            assertFalse(searcher.search(second, request, (id, sequence) -> true).metrics().indexCacheHit());
+            assertEquals(1, searcher.cachedSourceCount());
+            assertTrue(searcher.cachedBytes() <= 120_000L);
+
+            SourceSearchResult reloaded = searcher.search(first, request, (id, sequence) -> true);
+            assertFalse(reloaded.metrics().indexCacheHit());
+            assertEquals(1, searcher.cachedSourceCount());
+        }
+    }
+
     private static float[] targetVector() {
         float[] target = new float[16];
         target[1] = 0.8F;
@@ -85,6 +107,10 @@ class HnswPqSegmentIndexSearcherTest {
     }
 
     private static TestSource approximateSource(float[] target) {
+        return approximateSource("approximate-source", target);
+    }
+
+    private static TestSource approximateSource(String sourceId, float[] target) {
         ArrayList<TestVector> vectors = new ArrayList<>();
         for (int index = 0; index < 700; index++) {
             float[] vector = new float[16];
@@ -93,7 +119,7 @@ class HnswPqSegmentIndexSearcherTest {
             vectors.add(new TestVector("doc-" + index, index + 1L, vector, Map.of("bucket", index % 16)));
         }
         vectors.add(new TestVector("target", 2_000L, target, Map.of("bucket", 9)));
-        return new TestSource("approximate-source", MetricType.COSINE, 16, vectors);
+        return new TestSource(sourceId, MetricType.COSINE, 16, vectors);
     }
 
     private record TestVector(String id, long sequence, float[] vector, Map<String, Object> payload) {

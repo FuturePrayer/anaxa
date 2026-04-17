@@ -52,7 +52,9 @@ java --enable-preview --add-modules jdk.incubator.vector `
   --rate-limit-burst=256 `
   --slow-query-threshold-ms=250 `
   --audit-log=D:\anaxa-data\audit\audit.log `
-  --backup-dir=D:\anaxa-data\backups
+  --backup-dir=D:\anaxa-data\backups `
+  --snapshot-interval-seconds=900 `
+  --snapshot-retention-per-collection=7
 ```
 
 > 某些 JDK 26 build 可能不接受 `-XX:+ZGenerational`；如果启动时报错，移除该参数即可。
@@ -72,6 +74,8 @@ java --enable-preview --add-modules jdk.incubator.vector `
 | `--slow-query-threshold-ms` | `250` | 慢查询阈值；`0` 表示关闭 |
 | `--audit-log` | `{data-dir}\audit\audit.log` | 审计日志路径 |
 | `--backup-dir` | `{data-dir}\backups` | 逻辑备份目录 |
+| `--snapshot-interval-seconds` | `0` | 自动 snapshot 周期；`0` 表示关闭 |
+| `--snapshot-retention-per-collection` | `7` | 每个 collection 自动 snapshot 保留份数 |
 
 ## 5. 部署建议
 
@@ -86,7 +90,7 @@ java --enable-preview --add-modules jdk.incubator.vector `
 推荐流程：
 
 1. 创建集合
-2. 使用 JSON 或 NDJSON 批量写入
+2. 使用 JSON、NDJSON 或 binary batch 批量写入
 3. 执行一次 `POST /collections/{name}/flush`
 4. 再开始承接读流量
 
@@ -101,9 +105,11 @@ java --enable-preview --add-modules jdk.incubator.vector `
 
 ### 5.4 备份与恢复建议
 
-- 备份前尽量确保 collection 没有待处理的 flush / compaction
+- 自动 snapshot 适合做日常保底，手工 backup/snapshot 更适合发布、迁移、批量导入后的显式留档
+- 备份前尽量确保 collection 没有待处理的 flush / compaction；自动 snapshot 会先执行一次 `flush`
 - 备份目录建议和数据目录分开
 - 恢复时目标 collection 名必须不存在
+- 如果开启自动 snapshot，建议把保留份数与磁盘容量一起做容量规划
 
 ## 6. tenant / API key 文件示例
 

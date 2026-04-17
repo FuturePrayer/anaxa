@@ -10,13 +10,18 @@
         <version>1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>anaxa-common</artifactId>
-    <name>AnaxaDB Common</name>
+    <artifactId>anaxa-sdk</artifactId>
+    <name>AnaxaDB SDK</name>
 
     <dependencies>
         <dependency>
-            <groupId>tools.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
+            <groupId>cn.suhoan</groupId>
+            <artifactId>anaxa-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

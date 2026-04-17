@@ -42,6 +42,14 @@ final class MetricsRegistry implements EngineObserver {
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> compactionDurationNanos = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> compactionDurationCount = new ConcurrentHashMap<>();
 
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotCounts = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotFailures = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotAutomaticRuns = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotManualRuns = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotRetentionDeletes = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotDurationNanos = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotDurationCount = new ConcurrentHashMap<>();
+
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchSourceCounts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ModeMetricKey, LongAdder> searchSourceModeCounts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchFilterCandidates = new ConcurrentHashMap<>();
@@ -85,6 +93,27 @@ final class MetricsRegistry implements EngineObserver {
 
     void recordRateLimited() {
         rateLimitedRequests.increment();
+    }
+
+    void recordSnapshot(String tenantId, String collectionName, long durationNanos, boolean success, boolean automatic) {
+        CollectionMetricKey key = new CollectionMetricKey(tenantId, collectionName);
+        if (success) {
+            snapshotCounts.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        } else {
+            snapshotFailures.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        }
+        if (automatic) {
+            snapshotAutomaticRuns.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        } else {
+            snapshotManualRuns.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        }
+        snapshotDurationNanos.computeIfAbsent(key, ignored -> new LongAdder()).add(durationNanos);
+        snapshotDurationCount.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+    }
+
+    void recordSnapshotRetentionDelete(String tenantId, String collectionName) {
+        snapshotRetentionDeletes.computeIfAbsent(new CollectionMetricKey(tenantId, collectionName), ignored -> new LongAdder())
+                .increment();
     }
 
     void recordSearch(String tenantId, String collectionName, int hitCount, long durationNanos, boolean slowQuery) {
@@ -240,6 +269,13 @@ final class MetricsRegistry implements EngineObserver {
         appendCollectionCounters(builder, "anaxa_engine_compaction_input_bytes_total", compactionInputBytes, collectionFilter);
         appendCollectionCounters(builder, "anaxa_engine_compaction_output_bytes_total", compactionOutputBytes, collectionFilter);
         appendCollectionDuration(builder, "anaxa_engine_compaction_duration_seconds", compactionDurationNanos, compactionDurationCount, collectionFilter);
+
+        appendCollectionCounters(builder, "anaxa_lifecycle_snapshot_total", snapshotCounts, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_lifecycle_snapshot_failures_total", snapshotFailures, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_lifecycle_snapshot_automatic_total", snapshotAutomaticRuns, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_lifecycle_snapshot_manual_total", snapshotManualRuns, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_lifecycle_snapshot_retention_deletes_total", snapshotRetentionDeletes, collectionFilter);
+        appendCollectionDuration(builder, "anaxa_lifecycle_snapshot_duration_seconds", snapshotDurationNanos, snapshotDurationCount, collectionFilter);
 
         appendCollectionCounters(builder, "anaxa_search_sources_total", searchSourceCounts, collectionFilter);
         appendModeCounters(builder, "anaxa_search_source_queries_total", searchSourceModeCounts, modeFilter);

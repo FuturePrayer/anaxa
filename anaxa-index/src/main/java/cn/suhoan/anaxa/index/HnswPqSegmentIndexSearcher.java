@@ -29,9 +29,12 @@ import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiPredicate;
 
 public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
+    private static final long DEFAULT_CACHE_BUDGET_BYTES = 512L * 1024L * 1024L;
+    private static final int DEFAULT_CACHE_ENTRY_LIMIT = 64;
     private static final int EXACT_SCAN_THRESHOLD_BASE = 256;
     private static final int FILTER_EXACT_SCAN_THRESHOLD_BASE = 512;
     private static final int EF_SEARCH_BASE = 64;
@@ -55,45 +58,52 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
     private static final int ARTIFACT_FLAG_GRAPH = 1 << 1;
     private static final ValueLayout.OfFloat FLOAT_LAYOUT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
 
-    private final ConcurrentHashMap<String, CachedSourceIndex> cache;
+    private final ConcurrentHashMap<String, CacheEntry> cache;
+    private final long cacheBudgetBytes;
+    private final int cacheEntryLimit;
+    private final AtomicLong cachedBytes;
 
     public HnswPqSegmentIndexSearcher() {
+        this(DEFAULT_CACHE_BUDGET_BYTES, DEFAULT_CACHE_ENTRY_LIMIT);
+    }
+
+    HnswPqSegmentIndexSearcher(long cacheBudgetBytes, int cacheEntryLimit) {
+        if (cacheBudgetBytes <= 0L) {
+            throw new IllegalArgumentException("cacheBudgetBytes must be positive");
+        }
+        if (cacheEntryLimit <= 0) {
+            throw new IllegalArgumentException("cacheEntryLimit must be positive");
+        }
         this.cache = new ConcurrentHashMap<>();
+        this.cacheBudgetBytes = cacheBudgetBytes;
+        this.cacheEntryLimit = cacheEntryLimit;
+        this.cachedBytes = new AtomicLong();
     }
 
     @Override
     public SourceSearchResult search(SearchableVectors source, SearchRequest request, BiPredicate<String, Long> isLiveEntry) {
         AtomicBoolean indexCacheHit = new AtomicBoolean(false);
-        CachedSourceIndex index = cache.compute(source.sourceId(), (sourceId, current) ->
-                current != null && current.version() == source.searchStateVersion()
-                        ? markCacheHit(current, indexCacheHit)
-                        : CachedSourceIndex.build(source)
-        );
-        return index.search(source, request, isLiveEntry, indexCacheHit.get());
+        CacheEntry entry = cacheEntry(source, indexCacheHit);
+        return entry.index().search(source, request, isLiveEntry, indexCacheHit.get());
     }
 
     @Override
     public void warm(SearchableVectors source) {
-        cache.compute(source.sourceId(), (sourceId, current) ->
-                current != null && current.version() == source.searchStateVersion()
-                        ? current
-                        : CachedSourceIndex.build(source)
-        );
+        cacheEntry(source, new AtomicBoolean(false));
     }
 
     @Override
     public void evict(String sourceId) {
-        cache.remove(sourceId);
+        CacheEntry removed = cache.remove(sourceId);
+        if (removed != null) {
+            cachedBytes.addAndGet(-removed.index().approximateBytes());
+        }
     }
 
     @Override
     public void close() {
         cache.clear();
-    }
-
-    private static CachedSourceIndex markCacheHit(CachedSourceIndex current, AtomicBoolean cacheHit) {
-        cacheHit.set(true);
-        return current;
+        cachedBytes.set(0L);
     }
 
     private record CachedSourceIndex(
@@ -104,7 +114,8 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             PayloadFilterIndex payloadIndex,
             PayloadColumnStore payloadColumnStore,
             ProductQuantizer quantizer,
-            HnswGraph graph
+            HnswGraph graph,
+            long approximateBytes
     ) {
         private static CachedSourceIndex build(SearchableVectors source) {
             source.prefetch(BUILD_PREFETCH_BUDGET_BYTES);
@@ -115,14 +126,15 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                 if (tombstone) {
                     return;
                 }
-                vectors.add(new IndexedVectorRef(id, sequence, norm, vectorSegment, vectorOffsetBytes, payload));
-                payloads.add(payload);
+                    vectors.add(new IndexedVectorRef(id, sequence, norm, vectorSegment, vectorOffsetBytes, payload));
+                    payloads.add(payload);
             });
 
+            long approximateBytes = estimateCacheFootprint(source, vectors.size());
             Path artifactPath = source.searchArtifactPath();
             if (artifactPath != null && Files.isRegularFile(artifactPath)) {
                 try {
-                    return loadFromArtifact(source, vectors, artifactPath);
+                    return loadFromArtifact(source, vectors, artifactPath, approximateBytes);
                 } catch (IOException | RuntimeException exception) {
                     tryDelete(artifactPath);
                 }
@@ -151,7 +163,8 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                     payloadIndex,
                     payloadColumnStore,
                     quantizer,
-                    graph
+                    graph,
+                    approximateBytes
             );
             if (artifactPath != null) {
                 persistArtifact(cached, artifactPath);
@@ -162,7 +175,8 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
         private static CachedSourceIndex loadFromArtifact(
                 SearchableVectors source,
                 List<IndexedVectorRef> vectors,
-                Path artifactPath
+                Path artifactPath,
+                long approximateBytes
         ) throws IOException {
             try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(artifactPath)))) {
                 if (input.readInt() != ARTIFACT_MAGIC) {
@@ -216,7 +230,8 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                         payloadIndex,
                         payloadColumnStore,
                         quantizer,
-                        graph
+                        graph,
+                        approximateBytes
                 );
             }
         }
@@ -416,6 +431,54 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
     private record ExactScanResult(List<SearchHit> hits, int scoredCandidateCount) {
     }
 
+    private CacheEntry cacheEntry(SearchableVectors source, AtomicBoolean indexCacheHit) {
+        long now = System.nanoTime();
+        CacheEntry entry = cache.compute(source.sourceId(), (sourceId, current) -> {
+            if (current != null && current.index().version() == source.searchStateVersion()) {
+                current.touch(now);
+                indexCacheHit.set(true);
+                return current;
+            }
+            CacheEntry replacement = new CacheEntry(sourceId, CachedSourceIndex.build(source), now);
+            long previousBytes = current == null ? 0L : current.index().approximateBytes();
+            cachedBytes.addAndGet(replacement.index().approximateBytes() - previousBytes);
+            return replacement;
+        });
+        evictColdEntries(source.sourceId());
+        return entry;
+    }
+
+    private void evictColdEntries(String protectedSourceId) {
+        if (cache.size() <= cacheEntryLimit && cachedBytes.get() <= cacheBudgetBytes) {
+            return;
+        }
+        List<CacheEntry> candidates = cache.values().stream()
+                .filter(entry -> !entry.sourceId().equals(protectedSourceId))
+                .sorted(Comparator.comparingLong(CacheEntry::lastAccessNanos))
+                .toList();
+        for (CacheEntry candidate : candidates) {
+            if (cache.size() <= cacheEntryLimit && cachedBytes.get() <= cacheBudgetBytes) {
+                return;
+            }
+            if (cache.remove(candidate.sourceId(), candidate)) {
+                cachedBytes.addAndGet(-candidate.index().approximateBytes());
+            }
+        }
+    }
+
+    int cachedSourceCount() {
+        return cache.size();
+    }
+
+    long cachedBytes() {
+        return Math.max(0L, cachedBytes.get());
+    }
+
+    private static long estimateCacheFootprint(SearchableVectors source, int vectorCount) {
+        long vectorBytes = (long) Math.max(1, vectorCount) * Math.max(1, source.dimension()) * Float.BYTES * 2L;
+        return Math.max(source.approximateBytes(), vectorBytes);
+    }
+
     private record AnnSearchPlan(boolean exact, int efSearch, int rerankLimit, long prefetchBudgetBytes) {
         private static AnnSearchPlan plan(
                 int vectorCount,
@@ -475,6 +538,34 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             long vectorOffsetBytes,
             Map<String, Object> payload
     ) {
+    }
+
+    private static final class CacheEntry {
+        private final String sourceId;
+        private final CachedSourceIndex index;
+        private volatile long lastAccessNanos;
+
+        private CacheEntry(String sourceId, CachedSourceIndex index, long lastAccessNanos) {
+            this.sourceId = sourceId;
+            this.index = index;
+            this.lastAccessNanos = lastAccessNanos;
+        }
+
+        private String sourceId() {
+            return sourceId;
+        }
+
+        private CachedSourceIndex index() {
+            return index;
+        }
+
+        private long lastAccessNanos() {
+            return lastAccessNanos;
+        }
+
+        private void touch(long timestampNanos) {
+            lastAccessNanos = timestampNanos;
+        }
     }
 
     private static int log2ceil(int value) {

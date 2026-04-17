@@ -1,6 +1,6 @@
 # AnaxaDB
 
-AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已经具备可运行的单机服务形态，支持多租户、WAL/Segment 恢复、HNSW+PQ 检索、Prometheus 指标、审计日志、备份恢复，以及面向知识库场景的 **NDJSON 批量写入**、**payload-only partial update** 和 **delete/update 压力下的自适应 flush/compaction**。
+AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已经具备可运行的单机服务形态，支持多租户、WAL/Segment 恢复、HNSW+PQ 检索、Prometheus 指标、审计日志、备份恢复，以及面向知识库场景的 **NDJSON 批量写入**、**payload-only partial update** 和 **delete/update 压力下的自适应 flush/compaction**。同时，仓库也提供了一个 **基于 JDK 25、无预览特性、直接使用 JDK HttpClient 的 Java SDK**，方便业务侧直接接入。
 
 ## 文档导航
 
@@ -10,6 +10,7 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已
 | [docs/deployment.md](docs/deployment.md) | 环境要求、构建打包、启动参数、部署与运维建议 |
 | [docs/http-api.md](docs/http-api.md) | HTTP 接口文档、鉴权/租户头、请求与响应格式、错误码 |
 | [docs/usage.md](docs/usage.md) | 常用操作示例，包括 JSON/NDJSON 写入、PATCH partial update、搜索、删除、备份恢复 |
+| [docs/sdk.md](docs/sdk.md) | Java SDK 依赖方式、基础 API、高阶流程 API 与代码示例 |
 | [docs/benchmark.md](docs/benchmark.md) | Python 压测脚本、Java benchmark 模块、benchmark 报告字段说明 |
 | [docs/roadmap.md](docs/roadmap.md) | 当前实现与架构愿景的差距、已完成项、后续演进建议 |
 
@@ -62,6 +63,7 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已
 | 模块 | 作用 |
 | --- | --- |
 | `anaxa-common` | 通用模型、错误定义、JSON 工具、上下文与工具类 |
+| `anaxa-sdk` | 基于 JDK 25 的 Java SDK，封装 HttpClient、基础 REST API 与高阶写入/同步流程 |
 | `anaxa-index` | HNSW+PQ 搜索器、SIMD 打分、Payload 过滤索引、Top-K 归并 |
 | `anaxa-storage` | WAL、堆外 MemTable、Immutable Segment、恢复与校验 |
 | `anaxa-engine` | collection 生命周期、检索编排、flush/compaction、partial update |

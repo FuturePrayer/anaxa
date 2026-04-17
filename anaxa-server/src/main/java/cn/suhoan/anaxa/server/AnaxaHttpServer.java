@@ -4,6 +4,7 @@ import cn.suhoan.anaxa.common.context.RequestContext;
 import cn.suhoan.anaxa.common.error.NotFoundException;
 import cn.suhoan.anaxa.common.error.ValidationException;
 import cn.suhoan.anaxa.common.json.JsonSupport;
+import cn.suhoan.anaxa.common.model.BackupSummary;
 import cn.suhoan.anaxa.common.model.BackupCollectionRequest;
 import cn.suhoan.anaxa.common.model.CollectionDefinition;
 import cn.suhoan.anaxa.common.model.CollectionStats;
@@ -15,8 +16,11 @@ import cn.suhoan.anaxa.common.model.PartialUpdateVectorsRequest;
 import cn.suhoan.anaxa.common.model.RestoreCollectionRequest;
 import cn.suhoan.anaxa.common.model.SearchRequest;
 import cn.suhoan.anaxa.common.model.SearchResponse;
+import cn.suhoan.anaxa.common.model.TenantSnapshotResult;
+import cn.suhoan.anaxa.common.model.TenantStats;
 import cn.suhoan.anaxa.common.model.UpsertVector;
 import cn.suhoan.anaxa.common.model.UpsertVectorsRequest;
+import cn.suhoan.anaxa.common.util.BinaryVectorStreams;
 import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
@@ -35,6 +39,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,6 +47,7 @@ import java.util.concurrent.Executors;
 public final class AnaxaHttpServer implements AutoCloseable {
     private static final ScopedValue<RequestContext> CURRENT_REQUEST = ScopedValue.newInstance();
     private static final int NDJSON_UPSERT_BATCH_SIZE = 512;
+    private static final int BINARY_UPSERT_BATCH_SIZE = 512;
 
     private final VectorDatabaseEngine engine;
     private final HttpServer server;
@@ -51,6 +57,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
     private final MetricsRegistry metrics;
     private final AuditLogger auditLogger;
     private final ServerConfig config;
+    private final BackupLifecycleManager backupLifecycle;
 
     public AnaxaHttpServer(ServerConfig config) throws IOException {
         this(new MetricsRegistry(), config);
@@ -73,12 +80,20 @@ public final class AnaxaHttpServer implements AutoCloseable {
         this.rateLimiter = new RequestRateLimiter(config.rateLimitPerMinute(), config.rateLimitBurst());
         this.metrics = metrics;
         this.auditLogger = new AuditLogger(config.auditLogPath());
+        this.backupLifecycle = new BackupLifecycleManager(
+                engine,
+                config.backupDirectory(),
+                config.snapshotIntervalSeconds(),
+                config.autoSnapshotRetentionPerCollection(),
+                metrics
+        );
         this.server.setExecutor(requestExecutor);
         this.server.createContext("/", this::handleExchange);
     }
 
     public void start() {
         server.start();
+        backupLifecycle.start();
     }
 
     public int port() {
@@ -88,6 +103,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
     @Override
     public void close() {
         server.stop(1);
+        backupLifecycle.close();
         requestExecutor.shutdown();
         try {
             if (!requestExecutor.awaitTermination(10L, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -182,6 +198,26 @@ public final class AnaxaHttpServer implements AutoCloseable {
             );
         }
 
+        if (path.size() == 1 && "tenants".equals(path.getFirst())) {
+            requireMethod(method, "GET");
+            return listTenants(exchange, context, tenantScope);
+        }
+
+        if (path.size() == 2 && "tenants".equals(path.getFirst())) {
+            requireMethod(method, "GET");
+            return writeJson(exchange, 200, tenantStats(requireTenantAccess(path.get(1), tenantScope)), context);
+        }
+
+        if (path.size() == 3 && "tenants".equals(path.getFirst()) && "snapshot".equals(path.get(2))) {
+            requireMethod(method, "POST");
+            return snapshotTenant(exchange, context, tenantScope, path.get(1));
+        }
+
+        if (path.size() == 1 && "backups".equals(path.getFirst())) {
+            requireMethod(method, "GET");
+            return writeJson(exchange, 200, listBackups(tenantScope), context);
+        }
+
         if (path.size() == 1 && "collections".equals(path.getFirst())) {
             return switch (method) {
                 case "GET" -> writeJson(
@@ -255,6 +291,9 @@ public final class AnaxaHttpServer implements AutoCloseable {
         if (isNdjsonContentType(exchange.getRequestHeaders())) {
             return upsertVectorsNdjson(exchange, context, tenantId, collectionName);
         }
+        if (isBinaryVectorContentType(exchange.getRequestHeaders())) {
+            return upsertVectorsBinary(exchange, context, tenantId, collectionName);
+        }
         UpsertVectorsRequest request = readBody(exchange, UpsertVectorsRequest.class);
         TenantUsage usage = tenantUsage(tenantId);
         enforceVectorQuota(
@@ -279,18 +318,34 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 batch.add(vector);
                 ingested[0]++;
                 if (batch.size() >= NDJSON_UPSERT_BATCH_SIZE) {
-                    flushNdjsonBatch(tenantId, collectionName, batch);
+                    flushUpsertBatch(tenantId, collectionName, batch);
                 }
             });
         }
         if (ingested[0] == 0L) {
             throw new ValidationException("Request body must not be empty");
         }
-        flushNdjsonBatch(tenantId, collectionName, batch);
+        flushUpsertBatch(tenantId, collectionName, batch);
         return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
     }
 
-    private void flushNdjsonBatch(String tenantId, String collectionName, ArrayList<UpsertVector> batch) {
+    private int upsertVectorsBinary(HttpExchange exchange, RequestContext context, String tenantId, String collectionName)
+            throws IOException {
+        int dimension = engine.stats(tenantId, collectionName).dimension();
+        ArrayList<UpsertVector> batch = new ArrayList<>(BINARY_UPSERT_BATCH_SIZE);
+        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
+            BinaryVectorStreams.readBatch(requestBody, dimension, vector -> {
+                batch.add(vector);
+                if (batch.size() >= BINARY_UPSERT_BATCH_SIZE) {
+                    flushUpsertBatch(tenantId, collectionName, batch);
+                }
+            });
+        }
+        flushUpsertBatch(tenantId, collectionName, batch);
+        return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
+    }
+
+    private void flushUpsertBatch(String tenantId, String collectionName, ArrayList<UpsertVector> batch) {
         if (batch.isEmpty()) {
             return;
         }
@@ -361,6 +416,28 @@ public final class AnaxaHttpServer implements AutoCloseable {
         );
     }
 
+    private int listTenants(HttpExchange exchange, RequestContext context, TenantScope tenantScope) throws IOException {
+        List<TenantStats> tenants;
+        if (tenantScope.allTenants()) {
+            TreeSet<String> tenantIds = new TreeSet<>(authorizer.configuredTenantPolicies().keySet());
+            engine.listCollections().stream().map(CollectionStats::tenantId).forEach(tenantIds::add);
+            if (tenantIds.isEmpty()) {
+                tenantIds.add(CollectionDefinition.DEFAULT_TENANT);
+            }
+            tenants = tenantIds.stream().map(this::tenantStats).toList();
+        } else {
+            tenants = List.of(tenantStats(tenantScope.tenantId()));
+        }
+        return writeJson(exchange, 200, tenants, context);
+    }
+
+    private int snapshotTenant(HttpExchange exchange, RequestContext context, TenantScope tenantScope, String requestedTenantId)
+            throws IOException {
+        String tenantId = requireTenantAccess(requestedTenantId, tenantScope);
+        TenantSnapshotResult result = backupLifecycle.snapshotTenant(tenantId, readOptionalBackupId(exchange));
+        return writeJson(exchange, 200, result, context);
+    }
+
     private int restoreCollection(HttpExchange exchange, RequestContext context, String tenantId, String backupId) throws IOException {
         RestoreCollectionRequest request = readBody(exchange, RestoreCollectionRequest.class);
         if (collectionExists(tenantId, request.collectionName())) {
@@ -393,6 +470,17 @@ public final class AnaxaHttpServer implements AutoCloseable {
             }
             requestBody.reset();
             return JsonSupport.read(requestBody, type);
+        }
+    }
+
+    private String readOptionalBackupId(HttpExchange exchange) throws IOException {
+        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
+            requestBody.mark(1);
+            if (requestBody.read() < 0) {
+                return null;
+            }
+            requestBody.reset();
+            return JsonSupport.read(requestBody, BackupCollectionRequest.class).backupId();
         }
     }
 
@@ -460,6 +548,17 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 || "application/x-jsonlines".equals(normalized);
     }
 
+    private boolean isBinaryVectorContentType(Headers headers) {
+        String contentType = headers.getFirst("Content-Type");
+        if (contentType == null) {
+            return false;
+        }
+        String normalized = contentType.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+        return "application/octet-stream".equals(normalized)
+                || "application/vnd.anaxa.vector-batch".equals(normalized)
+                || "application/x-anaxa-vector-batch".equals(normalized);
+    }
+
     private String resolveTraceId(Headers headers) {
         String traceId = headers.getFirst("X-Trace-Id");
         return traceId == null || traceId.isBlank() ? UUID.randomUUID().toString() : traceId;
@@ -496,6 +595,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
         return switch (route) {
             case "/health" -> null;
             case "/metrics" -> Role.ADMIN;
+            case "/tenants", "/tenants/{id}", "/backups" -> Role.READER;
             case "/collections" -> "GET".equals(method) ? Role.READER : Role.WRITER;
             case "/collections/{name}" -> Role.READER;
             case "/collections/{name}/vectors" -> Role.WRITER;
@@ -504,7 +604,8 @@ public final class AnaxaHttpServer implements AutoCloseable {
             case "/collections/{name}/flush",
                     "/collections/{name}/compact",
                     "/collections/{name}/backup",
-                    "/backups/{id}/restore" -> Role.ADMIN;
+                    "/backups/{id}/restore",
+                    "/tenants/{id}/snapshot" -> Role.ADMIN;
             default -> null;
         };
     }
@@ -516,6 +617,18 @@ public final class AnaxaHttpServer implements AutoCloseable {
         }
         if (path.size() == 1 && "metrics".equals(path.getFirst())) {
             return "/metrics";
+        }
+        if (path.size() == 1 && "tenants".equals(path.getFirst())) {
+            return "/tenants";
+        }
+        if (path.size() == 2 && "tenants".equals(path.getFirst())) {
+            return "/tenants/{id}";
+        }
+        if (path.size() == 3 && "tenants".equals(path.getFirst()) && "snapshot".equals(path.get(2))) {
+            return "/tenants/{id}/snapshot";
+        }
+        if (path.size() == 1 && "backups".equals(path.getFirst())) {
+            return "/backups";
         }
         if (path.size() == 1 && "collections".equals(path.getFirst())) {
             return "/collections";
@@ -571,7 +684,10 @@ public final class AnaxaHttpServer implements AutoCloseable {
     }
 
     private boolean allowsAllTenants(String route, String method) {
-        return "/metrics".equals(route) || ("/collections".equals(route) && "GET".equals(method));
+        return "/metrics".equals(route)
+                || "/tenants".equals(route)
+                || "/backups".equals(route)
+                || ("/collections".equals(route) && "GET".equals(method));
     }
 
     private RateLimitPolicy resolveRateLimitPolicy(TenantScope tenantScope) {
@@ -589,6 +705,42 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 collections.stream().mapToLong(CollectionStats::liveVectorCount).sum(),
                 collections.stream().mapToLong(CollectionStats::storageBytes).sum()
         );
+    }
+
+    private TenantStats tenantStats(String tenantId) {
+        String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
+        List<CollectionStats> collections = engine.listCollections(normalizedTenantId);
+        List<BackupSummary> backups = backupLifecycle.listBackups(normalizedTenantId);
+        TenantPolicy policy = authorizer.tenantPolicy(normalizedTenantId);
+        Integer rateLimitPerMinute = policy.rateLimitPolicy() == null ? null : policy.rateLimitPolicy().rateLimitPerMinute();
+        Integer rateLimitBurst = policy.rateLimitPolicy() == null ? null : policy.rateLimitPolicy().burstCapacity();
+        return new TenantStats(
+                normalizedTenantId,
+                collections.size(),
+                collections.stream().mapToLong(CollectionStats::liveVectorCount).sum(),
+                collections.stream().mapToLong(CollectionStats::tombstoneCount).sum(),
+                collections.stream().mapToInt(CollectionStats::segmentCount).sum(),
+                collections.stream().mapToLong(CollectionStats::storageBytes).sum(),
+                policy.maxCollections(),
+                policy.maxLiveVectors(),
+                policy.maxStorageBytes(),
+                rateLimitPerMinute,
+                rateLimitBurst,
+                backups.size(),
+                backups.stream().map(BackupSummary::createdAt).max(Instant::compareTo).orElse(null)
+        );
+    }
+
+    private List<BackupSummary> listBackups(TenantScope tenantScope) {
+        return tenantScope.allTenants() ? backupLifecycle.listBackups(null) : backupLifecycle.listBackups(tenantScope.tenantId());
+    }
+
+    private String requireTenantAccess(String requestedTenantId, TenantScope tenantScope) {
+        String normalizedTenantId = CollectionDefinition.normalizeTenantId(requestedTenantId);
+        if (tenantScope.allTenants() || normalizedTenantId.equals(tenantScope.tenantId())) {
+            return normalizedTenantId;
+        }
+        throw new HttpStatusException(403, "Principal cannot access tenant " + normalizedTenantId);
     }
 
     private boolean collectionExists(String tenantId, String collectionName) {

@@ -19,7 +19,9 @@ public record ServerConfig(
         int rateLimitBurst,
         long slowQueryThresholdMillis,
         Path auditLogPath,
-        Path backupDirectory
+        Path backupDirectory,
+        long snapshotIntervalSeconds,
+        int autoSnapshotRetentionPerCollection
 ) {
     public ServerConfig(String host, int port, Path dataDirectory, long defaultFlushThresholdBytes) {
         this(
@@ -33,7 +35,9 @@ public record ServerConfig(
                 256,
                 250L,
                 dataDirectory.resolve("audit").resolve("audit.log"),
-                dataDirectory.resolve("backups")
+                dataDirectory.resolve("backups"),
+                0L,
+                7
         );
     }
 
@@ -57,7 +61,39 @@ public record ServerConfig(
                 rateLimitBurst,
                 250L,
                 dataDirectory.resolve("audit").resolve("audit.log"),
-                dataDirectory.resolve("backups")
+                dataDirectory.resolve("backups"),
+                0L,
+                7
+        );
+    }
+
+    public ServerConfig(
+            String host,
+            int port,
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            Set<String> apiKeys,
+            Path apiKeyFile,
+            int rateLimitPerMinute,
+            int rateLimitBurst,
+            long slowQueryThresholdMillis,
+            Path auditLogPath,
+            Path backupDirectory
+    ) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                apiKeys,
+                apiKeyFile,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                slowQueryThresholdMillis,
+                auditLogPath,
+                backupDirectory,
+                0L,
+                7
         );
     }
 
@@ -85,6 +121,12 @@ public record ServerConfig(
         }
         auditLogPath = auditLogPath == null ? dataDirectory.resolve("audit").resolve("audit.log") : auditLogPath;
         backupDirectory = backupDirectory == null ? dataDirectory.resolve("backups") : backupDirectory;
+        if (snapshotIntervalSeconds < 0L) {
+            throw new IllegalArgumentException("snapshotIntervalSeconds must not be negative");
+        }
+        if (autoSnapshotRetentionPerCollection < 0) {
+            throw new IllegalArgumentException("autoSnapshotRetentionPerCollection must not be negative");
+        }
     }
 
     public static ServerConfig fromArgs(String[] args) {
@@ -99,6 +141,8 @@ public record ServerConfig(
         long slowQueryThresholdMillis = 250L;
         Path auditLogPath = null;
         Path backupDirectory = null;
+        long snapshotIntervalSeconds = 0L;
+        int autoSnapshotRetentionPerCollection = 7;
 
         for (String arg : args) {
             if (!arg.startsWith("--") || !arg.contains("=")) {
@@ -119,6 +163,8 @@ public record ServerConfig(
                 case "slow-query-threshold-ms" -> slowQueryThresholdMillis = Long.parseLong(value);
                 case "audit-log" -> auditLogPath = Paths.get(value);
                 case "backup-dir" -> backupDirectory = Paths.get(value);
+                case "snapshot-interval-seconds" -> snapshotIntervalSeconds = Long.parseLong(value);
+                case "snapshot-retention-per-collection" -> autoSnapshotRetentionPerCollection = Integer.parseInt(value);
                 default -> throw new IllegalArgumentException("Unknown argument: --" + key);
             }
         }
@@ -134,7 +180,9 @@ public record ServerConfig(
                 rateLimitBurst,
                 slowQueryThresholdMillis,
                 auditLogPath,
-                backupDirectory
+                backupDirectory,
+                snapshotIntervalSeconds,
+                autoSnapshotRetentionPerCollection
         );
     }
 

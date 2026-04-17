@@ -42,9 +42,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.StructuredTaskScope;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -55,9 +57,11 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 final class EngineCollection implements AutoCloseable {
     private static final int AUTO_COMPACTION_SEGMENT_THRESHOLD = 4;
     private static final long STARTUP_WARM_BUDGET_BYTES = 256L * 1024L * 1024L;
+    private static final long RESIDENT_CACHE_BUDGET_BYTES = 512L * 1024L * 1024L;
     private static final long MIN_ADAPTIVE_FLUSH_THRESHOLD_BYTES = 512L * 1024L;
     private static final int MIN_ADAPTIVE_FLUSH_MUTATIONS = 256;
     private static final int MAX_ADAPTIVE_FLUSH_MUTATIONS = 4_096;
+    private static final int MAX_WARM_QUEUE_DEPTH = 8;
     private static final long STALE_VERSION_COMPACTION_THRESHOLD = 512L;
     private static final long TOMBSTONE_COMPACTION_THRESHOLD = 256L;
     private static final double TOMBSTONE_RATIO_COMPACTION_THRESHOLD = 0.15D;
@@ -82,8 +86,12 @@ final class EngineCollection implements AutoCloseable {
     private final AtomicLong staleVersionDebt;
     private final AtomicLong tombstoneDebt;
     private final ExecutorService flushExecutor;
+    private final ExecutorService prefetchExecutor;
     private final QueryCache queryCache;
     private final Object searchLifecycleMonitor;
+    private final ConcurrentHashMap<String, ResidentSource> residentSources;
+    private final AtomicLong residentSourceBytes;
+    private final AtomicInteger queuedWarmTasks;
 
     private volatile OffHeapMemTable activeMemTable;
     private volatile WalAppender activeWal;
@@ -120,8 +128,12 @@ final class EngineCollection implements AutoCloseable {
         this.staleVersionDebt = new AtomicLong(Math.max(0L, persistedEntryCount(segments) - latestStates.size()));
         this.tombstoneDebt = new AtomicLong(persistedTombstoneCount(segments));
         this.flushExecutor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("anaxa-flush-", 0).factory());
+        this.prefetchExecutor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("anaxa-warm-", 0).factory());
         this.queryCache = new QueryCache(128);
         this.searchLifecycleMonitor = new Object();
+        this.residentSources = new ConcurrentHashMap<>();
+        this.residentSourceBytes = new AtomicLong();
+        this.queuedWarmTasks = new AtomicInteger();
     }
 
     static EngineCollection createNew(
@@ -476,6 +488,7 @@ final class EngineCollection implements AutoCloseable {
             List<SearchableVectors> activeSources = sources.stream()
                     .filter(source -> source.size() > 0)
                     .toList();
+            activeSources.forEach(source -> touchResidentSource(source.sourceId()));
 
             try {
                 ArrayList<SourceSearchResult> partialResults = new ArrayList<>(activeSources.size());
@@ -628,6 +641,21 @@ final class EngineCollection implements AutoCloseable {
             }
         }
 
+        prefetchExecutor.shutdown();
+        try {
+            if (!prefetchExecutor.awaitTermination(10L, TimeUnit.SECONDS)) {
+                prefetchExecutor.shutdownNow();
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            prefetchExecutor.shutdownNow();
+            if (failure == null) {
+                failure = new RuntimeException("Interrupted while closing warmup tasks for collection " + definition.name(), exception);
+            } else {
+                failure.addSuppressed(exception);
+            }
+        }
+
         awaitActiveSearches();
         failure = closeQuietly(activeMemTable, failure);
         for (OffHeapMemTable memTable : pendingFlushMemTables) {
@@ -707,7 +735,7 @@ final class EngineCollection implements AutoCloseable {
         try {
             ImmutableSegment segment = SegmentWriter.write(paths, definition, frozenMemTable);
             if (segment != null) {
-                warmSourceBestEffort(segment);
+                scheduleWarmSource(segment);
             }
             stateLock.writeLock().lock();
             try {
@@ -837,30 +865,25 @@ final class EngineCollection implements AutoCloseable {
             return;
         }
         List<ImmutableSegment> warmupSnapshot = List.copyOf(segments);
-        flushExecutor.submit(() -> {
-            long warmedBytes = 0L;
-            for (int index = warmupSnapshot.size() - 1; index >= 0; index--) {
-                ImmutableSegment segment = warmupSnapshot.get(index);
-                long segmentBytes = Math.max(1L, segment.approximateBytes());
-                if (warmedBytes > 0L && warmedBytes + segmentBytes > STARTUP_WARM_BUDGET_BYTES) {
-                    break;
-                }
-                beginSearch();
-                try {
-                    warmSourceBestEffort(segment);
-                } finally {
-                    endSearch();
-                }
-                warmedBytes += segmentBytes;
+        long warmedBytes = 0L;
+        for (int index = warmupSnapshot.size() - 1; index >= 0; index--) {
+            ImmutableSegment segment = warmupSnapshot.get(index);
+            long segmentBytes = Math.max(1L, segment.approximateBytes());
+            if (warmedBytes > 0L && warmedBytes + segmentBytes > STARTUP_WARM_BUDGET_BYTES) {
+                break;
             }
-        });
+            scheduleWarmSource(segment);
+            warmedBytes += segmentBytes;
+        }
     }
 
     private void warmSourceBestEffort(SearchableVectors source) {
         try {
             searcher.warm(source);
+            rememberResidentSource(source);
         } catch (RuntimeException exception) {
             searcher.evict(source.sourceId());
+            forgetResidentSource(source.sourceId());
         }
     }
 
@@ -955,7 +978,7 @@ final class EngineCollection implements AutoCloseable {
                 ? null
                 : SegmentWriter.write(paths, definition, generationCounter.incrementAndGet(), compactedEntries);
         if (compactedSegment != null) {
-            warmSourceBestEffort(compactedSegment);
+            scheduleWarmSource(compactedSegment);
         }
 
         stateLock.writeLock().lock();
@@ -1024,6 +1047,7 @@ final class EngineCollection implements AutoCloseable {
     }
 
     private RuntimeException deleteCompactedSegment(ImmutableSegment candidate, RuntimeException failure) {
+        forgetResidentSource(candidate.sourceId());
         searcher.evict(candidate.sourceId());
         RuntimeException updatedFailure = closeQuietly(candidate, failure);
         try {
@@ -1172,6 +1196,98 @@ final class EngineCollection implements AutoCloseable {
             }
             failure.addSuppressed(exception);
             return failure;
+        }
+    }
+
+    private void scheduleWarmSource(SearchableVectors source) {
+        if (!(source instanceof ImmutableSegment) || source.approximateBytes() <= 0L || backgroundFailure != null || closed.get()) {
+            return;
+        }
+        touchResidentSource(source.sourceId());
+        if (residentSources.containsKey(source.sourceId())) {
+            return;
+        }
+        if (queuedWarmTasks.incrementAndGet() > MAX_WARM_QUEUE_DEPTH) {
+            queuedWarmTasks.decrementAndGet();
+            return;
+        }
+        try {
+            prefetchExecutor.submit(() -> {
+                beginSearch();
+                try {
+                    warmSourceBestEffort(source);
+                } finally {
+                    endSearch();
+                    queuedWarmTasks.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException exception) {
+            queuedWarmTasks.decrementAndGet();
+            if (!closed.get()) {
+                throw exception;
+            }
+        }
+    }
+
+    private void rememberResidentSource(SearchableVectors source) {
+        ResidentSource updated = new ResidentSource(source.approximateBytes(), System.nanoTime());
+        ResidentSource previous = residentSources.put(source.sourceId(), updated);
+        residentSourceBytes.addAndGet(updated.approximateBytes() - (previous == null ? 0L : previous.approximateBytes()));
+        trimResidentSources(source.sourceId());
+    }
+
+    private void touchResidentSource(String sourceId) {
+        ResidentSource resident = residentSources.get(sourceId);
+        if (resident != null) {
+            resident.touch(System.nanoTime());
+        }
+    }
+
+    private void forgetResidentSource(String sourceId) {
+        ResidentSource removed = residentSources.remove(sourceId);
+        if (removed != null) {
+            residentSourceBytes.addAndGet(-removed.approximateBytes());
+        }
+    }
+
+    private void trimResidentSources(String protectedSourceId) {
+        if (residentSourceBytes.get() <= RESIDENT_CACHE_BUDGET_BYTES) {
+            return;
+        }
+        List<Map.Entry<String, ResidentSource>> candidates = residentSources.entrySet().stream()
+                .filter(entry -> !entry.getKey().equals(protectedSourceId))
+                .sorted(Map.Entry.comparingByValue(Comparator.comparingLong(ResidentSource::lastAccessNanos)))
+                .toList();
+        for (Map.Entry<String, ResidentSource> candidate : candidates) {
+            if (residentSourceBytes.get() <= RESIDENT_CACHE_BUDGET_BYTES) {
+                return;
+            }
+            if (residentSources.remove(candidate.getKey(), candidate.getValue())) {
+                residentSourceBytes.addAndGet(-candidate.getValue().approximateBytes());
+                searcher.evict(candidate.getKey());
+            }
+        }
+    }
+
+    private static final class ResidentSource {
+        private final long approximateBytes;
+        private volatile long lastAccessNanos;
+
+        private ResidentSource(long approximateBytes, long lastAccessNanos) {
+            this.approximateBytes = approximateBytes;
+            this.lastAccessNanos = lastAccessNanos;
+        }
+
+        private long approximateBytes() {
+            return approximateBytes;
+        }
+
+        private long lastAccessNanos() {
+            return lastAccessNanos;
+        }
+
+        private void touch(long nowNanos) {
+            lastAccessNanos = nowNanos;
         }
     }
 

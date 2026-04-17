@@ -5,14 +5,16 @@
 AnaxaDB 的目标是提供一个基于现代 Java 生态、可独立运行的向量数据库。当前版本已经覆盖了单机知识库后端所需的大部分基础能力：
 
 - 独立 HTTP 服务
+- JDK 25 Java SDK（无预览特性，基于 JDK HttpClient）
 - 多租户 namespace、租户配额与 tenant 级限流
-- JSON / NDJSON 批量写入
+- JSON / NDJSON / binary 批量写入
 - delete/tombstone
 - payload-only partial update
 - HNSW + PQ 近似检索
 - Payload 倒排与列式范围过滤
 - WAL / Segment checksum 与重启恢复
 - Prometheus 指标、JFR 事件、审计日志、备份恢复
+- 自动 snapshot、备份保留、tenant 运维视图
 
 ## 2. 当前功能简述
 
@@ -23,13 +25,14 @@ AnaxaDB 的目标是提供一个基于现代 Java 生态、可独立运行的向
 - `COSINE` / `L2` 两种距离度量
 - 批量向量写入
 - `application/x-ndjson` 流式批量写入
+- `application/vnd.anaxa.vector-batch` 二进制批量写入
 - 向量删除（Delete / Tombstone）
 - payload-only partial update（客户端不需要重传向量）
 - 面向 delete/update 负载的自适应 flush / compaction
 - 基于 HNSW + PQ 的近似 Top-K 检索，并在小候选集上自动回退精确扫描
 - Payload 精确匹配、`$in`、`$contains`、范围过滤、布尔组合、嵌套字段过滤
-- Segment prefetch、resident warmup、source index cache、collection query cache
-- API Key 热重载、RBAC、审计日志、备份恢复
+- Segment prefetch、resident warmup、独立预取队列、source index cache、collection query cache
+- API Key 热重载、RBAC、审计日志、tenant stats、备份盘点、自动/手工 snapshot
 - Prometheus 风格指标、慢查询统计、内部阶段指标
 
 ## 3. Maven 模块划分
@@ -37,6 +40,7 @@ AnaxaDB 的目标是提供一个基于现代 Java 生态、可独立运行的向
 | 模块 | 作用 |
 | --- | --- |
 | `anaxa-common` | 通用模型、错误定义、JSON 工具、上下文与共享工具类 |
+| `anaxa-sdk` | JDK 25 Java SDK、HttpClient 封装、搜索过滤 DSL、批量导入/同步高阶 API |
 | `anaxa-index` | 向量度量、SIMD 打分、HNSW+PQ 搜索器、Payload 过滤索引、Top-K 归并 |
 | `anaxa-storage` | Collection 目录布局、带 checksum 的 WAL、堆外 MemTable、Immutable Segment |
 | `anaxa-engine` | 集合生命周期、写入编排、恢复、structured concurrency 检索、adaptive flush/compaction |
@@ -53,7 +57,7 @@ anaxa-server
   - jdk.httpserver
   - Virtual Threads
   - ScopedValue(RequestContext)
-  - API Key auth / RBAC / tenant policy / quotas / audit / metrics
+  - API Key auth / RBAC / tenant policy / quotas / audit / metrics / snapshot lifecycle
     |
     v
 anaxa-engine
@@ -90,14 +94,22 @@ anaxa-storage            anaxa-index
 
 这条路径更适合大规模知识库导入。
 
-### 5.3 删除
+### 5.3 Binary 批量写入
+
+当 `Content-Type` 为 `application/vnd.anaxa.vector-batch`（也兼容 `application/octet-stream`）时：
+
+- 请求体使用定长 header + record 流式结构
+- 服务按批次解析并逐批落 WAL / MemTable
+- 比 JSON / NDJSON 更适合高吞吐、低解析开销的导入链路
+
+### 5.4 删除
 
 1. 客户端调用 `POST /collections/{name}/deletions`
 2. 引擎为当前仍然 live 的 ID 写 tombstone
 3. 搜索结果会立即屏蔽旧版本
 4. 后台 flush / compaction 清理历史版本和 tombstone
 
-### 5.4 Partial update
+### 5.5 Partial update
 
 当只需要修改 metadata / payload 时，客户端可以调用：
 
@@ -196,3 +208,4 @@ anaxa-storage            anaxa-index
 4. 新增文档继续走 upsert
 5. 只改 metadata 走 partial update
 6. 删除和高频修改由自适应 flush/compaction 接管，离峰再手动 compact
+7. 打开自动 snapshot + retention，把手工 snapshot 当作运维补充动作

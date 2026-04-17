@@ -63,6 +63,10 @@ final class ApiKeyAuthorizer {
         return policy == null ? TenantPolicy.unrestricted(normalizedTenantId) : policy;
     }
 
+    Map<String, TenantPolicy> configuredTenantPolicies() {
+        return loadDynamicConfig().securityConfig().tenantPolicies();
+    }
+
     private LoadedSecurityConfig loadDynamicConfig() {
         if (apiKeyFile == null) {
             return loadedConfig;

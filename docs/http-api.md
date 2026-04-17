@@ -33,9 +33,9 @@ X-Tenant-Id: <tenant-id>
 
 | 角色 | 可访问能力 |
 | --- | --- |
-| `READER` | 读集合、搜索、查看统计 |
+| `READER` | 读集合、搜索、查看统计、查看当前 tenant 的 tenant/backup 运维信息 |
 | `WRITER` | 创建集合、写入、partial update、删除；同时具备 `READER` 能力 |
-| `ADMIN` | `WRITER` 全部能力，以及 `/metrics`、flush、compaction、备份与恢复 |
+| `ADMIN` | `WRITER` 全部能力，以及 `/metrics`、flush、compaction、备份恢复、tenant snapshot |
 
 ## 3. 路由总览
 
@@ -43,11 +43,16 @@ X-Tenant-Id: <tenant-id>
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/metrics` | Prometheus 指标 |
+| `GET` | `/tenants` | 查看当前 tenant 或全部 tenant 运维统计 |
+| `GET` | `/tenants/{tenantId}` | 查看指定 tenant 运维统计 |
+| `POST` | `/tenants/{tenantId}/snapshot` | 对 tenant 内所有集合执行一次 snapshot |
+| `GET` | `/backups` | 查看当前 tenant 或全部 tenant 的备份列表 |
 | `POST` | `/collections` | 创建集合 |
 | `GET` | `/collections` | 查询集合列表 |
 | `GET` | `/collections/{name}` | 查询集合统计 |
 | `POST` | `/collections/{name}/vectors` | JSON 包装批量写入 |
 | `POST` | `/collections/{name}/vectors` | NDJSON 流式写入（`application/x-ndjson`） |
+| `POST` | `/collections/{name}/vectors` | binary 流式写入（`application/vnd.anaxa.vector-batch`） |
 | `PATCH` | `/collections/{name}/vectors` | payload-only partial update |
 | `POST` | `/collections/{name}/deletions` | 删除向量 |
 | `POST` | `/collections/{name}/flush` | 手动 flush |
@@ -82,6 +87,8 @@ X-Tenant-Id: <tenant-id>
 - `anaxa_search_source_index_cache_hits_total`
 - `anaxa_engine_flush_total`
 - `anaxa_engine_compaction_total`
+- `anaxa_lifecycle_snapshot_total`
+- `anaxa_lifecycle_snapshot_retention_deletes_total`
 - `anaxa_engine_live_vectors`
 - `anaxa_engine_collection_storage_bytes`
 
@@ -185,6 +192,28 @@ X-Tenant-Id: <tenant-id>
 
 - 服务按批次流式解析，不需要客户端先包装成大数组
 - 适合知识库初始导入或批量补录
+
+### 8.3 Binary 流式批量写入
+
+### `POST /collections/{name}/vectors`
+
+`Content-Type: application/vnd.anaxa.vector-batch`
+
+也兼容：
+
+- `application/octet-stream`
+- `application/x-anaxa-vector-batch`
+
+二进制格式：
+
+1. 固定头：`magic(4B) + version(4B) + dimension(4B)`，当前值为 `0x41584231 / 1 / collection.dimension`
+2. 后续每条记录：`idLength(4B) + payloadLength(4B) + id(UTF-8) + vector(float32 * dimension) + payload(JSON UTF-8)`
+
+行为：
+
+- 服务按批次流式解析，不需要先构造大 JSON 数组
+- 比 JSON / NDJSON 更适合高吞吐导入和更低解析开销的场景
+- 如果 header 中的 `dimension` 与 collection 不一致，会返回 `400`
 
 ## 9. Partial update
 
@@ -338,7 +367,77 @@ X-Tenant-Id: <tenant-id>
 
 恢复后的目标集合名必须不存在。
 
-## 14. 错误响应
+## 14. Tenant 运维与备份盘点
+
+### `GET /tenants`
+
+- 普通 tenant key / tenant-scoped admin：返回当前 tenant 视图
+- 全局 admin（不带 `X-Tenant-Id`）：返回全部 tenant
+
+返回字段包括：
+
+- `collectionCount`
+- `liveVectorCount`
+- `tombstoneCount`
+- `segmentCount`
+- `storageBytes`
+- `maxCollections`
+- `maxLiveVectors`
+- `maxStorageBytes`
+- `rateLimitPerMinute`
+- `rateLimitBurst`
+- `backupCount`
+- `lastSnapshotAt`
+
+### `GET /tenants/{tenantId}`
+
+返回单个 tenant 的运维统计；非全局访问时，路径上的 tenant 必须与当前 tenant 作用域一致。
+
+### `GET /backups`
+
+- 普通 tenant 作用域：只返回当前 tenant 的备份条目
+- 全局 admin：可查看所有 tenant 的备份条目
+
+返回示例：
+
+```json
+[
+  {
+    "backupId": "auto-tenant-a-docs-20260417120000",
+    "createdAt": "2026-04-17T12:00:00Z",
+    "stats": {
+      "name": "docs",
+      "dimension": 768,
+      "metric": "COSINE",
+      "liveVectorCount": 30000,
+      "tombstoneCount": 0,
+      "segmentCount": 1,
+      "flushInProgress": false,
+      "compactionInProgress": false,
+      "tenantId": "tenant-a",
+      "storageBytes": 178223867
+    }
+  }
+]
+```
+
+### `POST /tenants/{tenantId}/snapshot`
+
+请求体可为空，也可以显式指定 `backupId`：
+
+```json
+{
+  "backupId": "release-2026-04-17"
+}
+```
+
+行为：
+
+- 对 tenant 下的所有 collection 先执行一次 `flush`
+- 再把每个 collection 写入同一个 `backupId`
+- 返回该次 snapshot 产生的 backup 条目
+
+## 15. 错误响应
 
 统一格式：
 
