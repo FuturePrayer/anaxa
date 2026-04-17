@@ -4,6 +4,8 @@ import cn.suhoan.anaxa.common.model.CollectionStats;
 import cn.suhoan.anaxa.common.model.CreateCollectionRequest;
 import cn.suhoan.anaxa.common.model.DeleteVectorsRequest;
 import cn.suhoan.anaxa.common.model.MetricType;
+import cn.suhoan.anaxa.common.model.PartialUpdateVector;
+import cn.suhoan.anaxa.common.model.PartialUpdateVectorsRequest;
 import cn.suhoan.anaxa.common.model.SearchResponse;
 import cn.suhoan.anaxa.common.model.SearchRequest;
 import cn.suhoan.anaxa.common.model.UpsertVector;
@@ -17,6 +19,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
@@ -213,7 +216,10 @@ class VectorDatabaseEngineTest {
             waitFor(() -> engine.stats("docs").segmentCount() == 1, "live segment flush did not complete");
 
             engine.delete("docs", new DeleteVectorsRequest(List.of("alpha")));
-            waitFor(() -> engine.stats("docs").segmentCount() == 2, "tombstone segment flush did not complete");
+            waitFor(() -> {
+                CollectionStats stats = engine.stats("docs");
+                return stats.segmentCount() == 2 || (stats.segmentCount() == 0 && stats.tombstoneCount() == 0L);
+            }, "tombstone flush or auto compaction did not complete");
 
             engine.compact("docs");
 
@@ -273,6 +279,96 @@ class VectorDatabaseEngineTest {
                     10,
                     Map.of()
             )).hits().stream().map(hit -> hit.id()).toList());
+        }
+    }
+
+    @Test
+    void flushesUpdateHeavyMemtableBeforeByteThreshold() throws Exception {
+        try (VectorDatabaseEngine engine = new VectorDatabaseEngine(tempDir.resolve("adaptive-flush"), 1_000_000L)) {
+            engine.createCollection(new CreateCollectionRequest("docs", 3, MetricType.COSINE, 1_000_000L));
+
+            for (int index = 0; index < 2_200; index++) {
+                engine.upsert("docs", new UpsertVectorsRequest(List.of(
+                        new UpsertVector("alpha", new float[]{1.0F, 0.0F, 0.0F}, Map.of("version", index))
+                )));
+            }
+
+            waitFor(() -> engine.stats("docs").segmentCount() > 0, "update-heavy memtable did not flush adaptively");
+        }
+    }
+
+    @Test
+    void compactsDeleteHeavyHistoryWithoutManualTrigger() throws Exception {
+        try (VectorDatabaseEngine engine = new VectorDatabaseEngine(tempDir.resolve("adaptive-compact"), 1L)) {
+            engine.createCollection(new CreateCollectionRequest("docs", 3, MetricType.COSINE, 1L));
+
+            engine.upsert("docs", new UpsertVectorsRequest(List.of(
+                    new UpsertVector("alpha", new float[]{1.0F, 0.0F, 0.0F}, Map.of("tenant", "blue"))
+            )));
+            waitFor(() -> engine.stats("docs").segmentCount() == 1, "live segment flush did not complete");
+
+            engine.delete("docs", new DeleteVectorsRequest(List.of("alpha")));
+
+            waitFor(() -> {
+                CollectionStats stats = engine.stats("docs");
+                return stats.segmentCount() == 0 && stats.tombstoneCount() == 0L;
+            }, "delete-heavy history did not compact automatically");
+        }
+    }
+
+    @Test
+    void partiallyUpdatesPayloadsAndRecoversAcrossRestart() throws Exception {
+        Path dataDir = tempDir.resolve("partial-update");
+        LinkedHashMap<String, Object> patch = new LinkedHashMap<>();
+        patch.put("title", "Intro v2");
+        patch.put("obsolete", null);
+        patch.put("meta", Map.of("section", "basics", "published", true));
+
+        try (VectorDatabaseEngine engine = new VectorDatabaseEngine(dataDir, 1_000_000L)) {
+            engine.createCollection(new CreateCollectionRequest("docs", 3, MetricType.COSINE, 1_000_000L));
+            engine.upsert("docs", new UpsertVectorsRequest(List.of(
+                    new UpsertVector(
+                            "alpha",
+                            new float[]{1.0F, 0.0F, 0.0F},
+                            Map.of(
+                                    "title", "Intro",
+                                    "obsolete", "legacy",
+                                    "meta", Map.of("section", "draft", "priority", 1)
+                            )
+                    )
+            )));
+
+            engine.partialUpdate("docs", new PartialUpdateVectorsRequest(List.of(
+                    new PartialUpdateVector("alpha", patch)
+            )));
+
+            SearchResponse updated = engine.search("docs", new SearchRequest(
+                    new float[]{1.0F, 0.0F, 0.0F},
+                    10,
+                    Map.of("title", "Intro v2")
+            ));
+            assertEquals(List.of("alpha"), updated.hits().stream().map(hit -> hit.id()).toList());
+            assertEquals("Intro v2", updated.hits().get(0).payload().get("title"));
+            assertFalse(updated.hits().get(0).payload().containsKey("obsolete"));
+            assertEquals(
+                    Map.of("section", "basics", "priority", 1, "published", true),
+                    updated.hits().get(0).payload().get("meta")
+            );
+
+            engine.flush("docs");
+        }
+
+        try (VectorDatabaseEngine reopened = new VectorDatabaseEngine(dataDir, 1_000_000L)) {
+            SearchResponse recovered = reopened.search("docs", new SearchRequest(
+                    new float[]{1.0F, 0.0F, 0.0F},
+                    10,
+                    Map.of("title", "Intro v2")
+            ));
+            assertEquals(List.of("alpha"), recovered.hits().stream().map(hit -> hit.id()).toList());
+            assertEquals(
+                    Map.of("section", "basics", "priority", 1, "published", true),
+                    recovered.hits().get(0).payload().get("meta")
+            );
         }
     }
 

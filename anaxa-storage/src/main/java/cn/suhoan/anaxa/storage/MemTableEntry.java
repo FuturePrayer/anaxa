@@ -19,11 +19,15 @@ public record MemTableEntry(
         if (tombstone) {
             return WalRecord.tombstone(id, sequence);
         }
-        return WalRecord.live(id, vectorSegment.toArray(ValueLayout.JAVA_FLOAT), payload, sequence);
+        return WalRecord.liveTrusted(id, vectorSegment.toArray(ValueLayout.JAVA_FLOAT), payload, sequence);
     }
 
     @Override
     public byte[] vectorBytes() {
         return tombstone ? EMPTY_VECTOR_BYTES : vectorSegment.toArray(ValueLayout.JAVA_BYTE);
+    }
+
+    public float[] vector() {
+        return tombstone ? new float[0] : vectorSegment.toArray(ValueLayout.JAVA_FLOAT);
     }
 }

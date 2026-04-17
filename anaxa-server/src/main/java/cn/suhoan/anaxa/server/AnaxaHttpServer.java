@@ -11,9 +11,11 @@ import cn.suhoan.anaxa.common.model.CreateCollectionRequest;
 import cn.suhoan.anaxa.common.model.DeleteVectorsRequest;
 import cn.suhoan.anaxa.common.model.ErrorResponse;
 import cn.suhoan.anaxa.common.model.HealthResponse;
+import cn.suhoan.anaxa.common.model.PartialUpdateVectorsRequest;
 import cn.suhoan.anaxa.common.model.RestoreCollectionRequest;
 import cn.suhoan.anaxa.common.model.SearchRequest;
 import cn.suhoan.anaxa.common.model.SearchResponse;
+import cn.suhoan.anaxa.common.model.UpsertVector;
 import cn.suhoan.anaxa.common.model.UpsertVectorsRequest;
 import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
 import com.sun.net.httpserver.Headers;
@@ -28,8 +30,10 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -37,6 +41,7 @@ import java.util.concurrent.Executors;
 
 public final class AnaxaHttpServer implements AutoCloseable {
     private static final ScopedValue<RequestContext> CURRENT_REQUEST = ScopedValue.newInstance();
+    private static final int NDJSON_UPSERT_BATCH_SIZE = 512;
 
     private final VectorDatabaseEngine engine;
     private final HttpServer server;
@@ -197,8 +202,11 @@ public final class AnaxaHttpServer implements AutoCloseable {
         }
 
         if (path.size() == 3 && "collections".equals(path.getFirst()) && "vectors".equals(path.get(2))) {
-            requireMethod(method, "POST");
-            return upsertVectors(exchange, context, tenantScope.tenantId(), path.get(1));
+            return switch (method) {
+                case "POST" -> upsertVectors(exchange, context, tenantScope.tenantId(), path.get(1));
+                case "PATCH" -> partialUpdateVectors(exchange, context, tenantScope.tenantId(), path.get(1));
+                default -> throw new HttpStatusException(405, "Method not allowed");
+            };
         }
 
         if (path.size() == 3 && "collections".equals(path.getFirst()) && "deletions".equals(path.get(2))) {
@@ -244,6 +252,9 @@ public final class AnaxaHttpServer implements AutoCloseable {
     }
 
     private int upsertVectors(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
+        if (isNdjsonContentType(exchange.getRequestHeaders())) {
+            return upsertVectorsNdjson(exchange, context, tenantId, collectionName);
+        }
         UpsertVectorsRequest request = readBody(exchange, UpsertVectorsRequest.class);
         TenantUsage usage = tenantUsage(tenantId);
         enforceVectorQuota(
@@ -260,9 +271,61 @@ public final class AnaxaHttpServer implements AutoCloseable {
         return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
     }
 
+    private int upsertVectorsNdjson(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
+        ArrayList<UpsertVector> batch = new ArrayList<>(NDJSON_UPSERT_BATCH_SIZE);
+        long[] ingested = {0L};
+        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
+            JsonSupport.readNdjson(requestBody, UpsertVector.class, vector -> {
+                batch.add(vector);
+                ingested[0]++;
+                if (batch.size() >= NDJSON_UPSERT_BATCH_SIZE) {
+                    flushNdjsonBatch(tenantId, collectionName, batch);
+                }
+            });
+        }
+        if (ingested[0] == 0L) {
+            throw new ValidationException("Request body must not be empty");
+        }
+        flushNdjsonBatch(tenantId, collectionName, batch);
+        return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
+    }
+
+    private void flushNdjsonBatch(String tenantId, String collectionName, ArrayList<UpsertVector> batch) {
+        if (batch.isEmpty()) {
+            return;
+        }
+        UpsertVectorsRequest request = new UpsertVectorsRequest(List.copyOf(batch));
+        TenantUsage usage = tenantUsage(tenantId);
+        enforceVectorQuota(
+                tenantId,
+                usage,
+                engine.estimateAdditionalLiveVectors(tenantId, collectionName, request)
+        );
+        enforceStorageQuota(
+                tenantId,
+                usage,
+                engine.estimateUpsertBytes(tenantId, collectionName, request)
+        );
+        engine.upsert(tenantId, collectionName, request);
+        batch.clear();
+    }
+
     private int deleteVectors(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
         DeleteVectorsRequest request = readBody(exchange, DeleteVectorsRequest.class);
         engine.delete(tenantId, collectionName, request);
+        return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
+    }
+
+    private int partialUpdateVectors(HttpExchange exchange, RequestContext context, String tenantId, String collectionName)
+            throws IOException {
+        PartialUpdateVectorsRequest request = readBody(exchange, PartialUpdateVectorsRequest.class);
+        TenantUsage usage = tenantUsage(tenantId);
+        enforceStorageQuota(
+                tenantId,
+                usage,
+                engine.estimatePartialUpdateBytes(tenantId, collectionName, request)
+        );
+        engine.partialUpdate(tenantId, collectionName, request);
         return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
     }
 
@@ -384,6 +447,17 @@ public final class AnaxaHttpServer implements AutoCloseable {
         if (!expected.equals(method)) {
             throw new HttpStatusException(405, "Method not allowed");
         }
+    }
+
+    private boolean isNdjsonContentType(Headers headers) {
+        String contentType = headers.getFirst("Content-Type");
+        if (contentType == null) {
+            return false;
+        }
+        String normalized = contentType.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+        return "application/x-ndjson".equals(normalized)
+                || "application/jsonl".equals(normalized)
+                || "application/x-jsonlines".equals(normalized);
     }
 
     private String resolveTraceId(Headers headers) {

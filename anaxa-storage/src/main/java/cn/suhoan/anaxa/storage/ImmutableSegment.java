@@ -15,7 +15,9 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32;
@@ -40,6 +42,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
     private final Arena arena;
     private final MemorySegment mappedSegment;
     private final List<SegmentEntry> entries;
+    private final Map<String, SegmentEntry> entriesById;
     private final AtomicLong lastPrefetchNanos;
 
     private ImmutableSegment(
@@ -48,7 +51,8 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
             long generation,
             Arena arena,
             MemorySegment mappedSegment,
-            List<SegmentEntry> entries
+            List<SegmentEntry> entries,
+            Map<String, SegmentEntry> entriesById
     ) {
         this.path = path;
         this.definition = definition;
@@ -56,6 +60,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         this.arena = arena;
         this.mappedSegment = mappedSegment;
         this.entries = entries;
+        this.entriesById = entriesById;
         this.lastPrefetchNanos = new AtomicLong(0L);
     }
 
@@ -65,6 +70,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
             MemorySegment mappedSegment = channel.map(FileChannel.MapMode.READ_ONLY, 0L, channel.size(), arena);
             Header header = readHeader(mappedSegment, definition);
             ArrayList<SegmentEntry> entries = new ArrayList<>(header.entryCount());
+            HashMap<String, SegmentEntry> entriesById = new HashMap<>(Math.max(16, header.entryCount() * 2));
             long dataLimit = header.version() == CURRENT_VERSION
                     ? validateFooterAndResolveDataLimit(mappedSegment)
                     : mappedSegment.byteSize();
@@ -102,13 +108,23 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
                 byte[] payloadBytes = mappedSegment.asSlice(offset, payloadLength).toArray(ValueLayout.JAVA_BYTE);
                 offset += payloadLength;
 
-                entries.add(new SegmentEntry(id, sequence, tombstone, norm, vectorOffset, JsonSupport.readMap(payloadBytes)));
+                SegmentEntry entry = new SegmentEntry(id, sequence, tombstone, norm, vectorOffset, JsonSupport.readMap(payloadBytes));
+                entries.add(entry);
+                entriesById.put(id, entry);
             }
             if (offset != dataLimit) {
                 throw new IOException("Segment entry data length mismatch");
             }
 
-            return new ImmutableSegment(path, definition, header.generation(), arena, mappedSegment, List.copyOf(entries));
+            return new ImmutableSegment(
+                    path,
+                    definition,
+                    header.generation(),
+                    arena,
+                    mappedSegment,
+                    List.copyOf(entries),
+                    Map.copyOf(entriesById)
+            );
         } catch (Throwable throwable) {
             arena.close();
             throw throwable;
@@ -127,12 +143,28 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         return entries;
     }
 
+    public SegmentEntry entry(String id) {
+        return entriesById.get(id);
+    }
+
     public byte[] vectorBytes(SegmentEntry entry) {
         if (entry.tombstone()) {
             return new byte[0];
         }
         return mappedSegment.asSlice(entry.vectorOffsetBytes(), (long) definition.dimension() * Float.BYTES)
                 .toArray(ValueLayout.JAVA_BYTE);
+    }
+
+    public float[] vector(SegmentEntry entry) {
+        if (entry.tombstone()) {
+            return new float[0];
+        }
+        float[] vector = new float[definition.dimension()];
+        long offset = entry.vectorOffsetBytes();
+        for (int index = 0; index < vector.length; index++) {
+            vector[index] = mappedSegment.get(FLOAT_LAYOUT, offset + (long) index * Float.BYTES);
+        }
+        return vector;
     }
 
     @Override

@@ -121,6 +121,63 @@ class AnaxaHttpServerTest {
     }
 
     @Test
+    void supportsNdjsonBulkIngestAndPartialPayloadUpdates() throws Exception {
+        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-ndjson"), 1_000_000L))) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.port();
+
+            assertEquals(201, sendJson(
+                    client,
+                    baseUrl + "/collections",
+                    "POST",
+                    Map.of("name", "docs", "dimension", 3, "metric", "COSINE", "flushThresholdBytes", 1_000_000)
+            ).statusCode());
+
+            String ndjson = """
+                    {"id":"alpha","vector":[1.0,0.0,0.0],"payload":{"tenant":"blue","meta":{"section":"draft"}}}
+                    {"id":"beta","vector":[0.0,1.0,0.0],"payload":{"tenant":"red"}}
+                    """;
+            HttpResponse<String> ndjsonUpsert = sendBody(
+                    client,
+                    baseUrl + "/collections/docs/vectors",
+                    "POST",
+                    ndjson,
+                    "application/x-ndjson",
+                    null,
+                    null
+            );
+            assertEquals(200, ndjsonUpsert.statusCode());
+            assertEquals(2L, JsonSupport.mapper().readValue(ndjsonUpsert.body(), CollectionStats.class).liveVectorCount());
+
+            HttpResponse<String> patch = sendJson(
+                    client,
+                    baseUrl + "/collections/docs/vectors",
+                    "PATCH",
+                    Map.of("updates", List.of(
+                            Map.of(
+                                    "id", "alpha",
+                                    "payload", Map.of(
+                                            "tenant", "green",
+                                            "meta", Map.of("section", "intro")
+                                    )
+                            )
+                    ))
+            );
+            assertEquals(200, patch.statusCode());
+
+            SearchResponse response = JsonSupport.mapper().readValue(sendJson(
+                    client,
+                    baseUrl + "/collections/docs/search",
+                    "POST",
+                    Map.of("vector", List.of(1.0F, 0.0F, 0.0F), "topK", 10, "filter", Map.of("tenant", "green"))
+            ).body(), SearchResponse.class);
+            assertEquals(List.of("alpha"), response.hits().stream().map(hit -> hit.id()).toList());
+            assertEquals(Map.of("section", "intro"), response.hits().get(0).payload().get("meta"));
+        }
+    }
+
+    @Test
     void servesDeleteAndCompactionEndpoints() throws Exception {
         try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-delete"), 1L))) {
             server.start();
@@ -155,7 +212,9 @@ class AnaxaHttpServerTest {
             );
             assertEquals(200, delete.statusCode());
 
-            waitForCollectionStats(client, baseUrl, stats -> stats.segmentCount() == 2, "tombstone segment flush did not complete");
+            waitForCollectionStats(client, baseUrl, stats ->
+                            stats.segmentCount() == 2 || (stats.segmentCount() == 0 && stats.tombstoneCount() == 0L),
+                    "tombstone flush or auto compaction did not complete");
 
             HttpResponse<String> compact = sendJson(
                     client,
@@ -509,7 +568,15 @@ class AnaxaHttpServerTest {
                     "admin-key",
                     "tenant-a"
             ).statusCode());
-            waitForCollectionStats(client, baseUrl, "docs", "admin-key", "tenant-a", stats -> stats.segmentCount() >= 2, "tombstone flush did not complete");
+            waitForCollectionStats(
+                    client,
+                    baseUrl,
+                    "docs",
+                    "admin-key",
+                    "tenant-a",
+                    stats -> stats.segmentCount() >= 2 || (stats.segmentCount() >= 1 && stats.tombstoneCount() == 0L),
+                    "tombstone flush or auto compaction did not complete"
+            );
 
             assertEquals(200, sendJson(
                     client,
@@ -726,15 +793,27 @@ class AnaxaHttpServerTest {
             String apiKey,
             String tenantId
     ) throws Exception {
+        return sendBody(client, uri, method, JsonSupport.writeString(body), "application/json", apiKey, tenantId);
+    }
+
+    private HttpResponse<String> sendBody(
+            HttpClient client,
+            String uri,
+            String method,
+            String body,
+            String contentType,
+            String apiKey,
+            String tenantId
+    ) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(uri))
-                .header("Content-Type", "application/json");
+                .header("Content-Type", contentType);
         if (apiKey != null) {
             builder.header("X-API-Key", apiKey);
         }
         if (tenantId != null) {
             builder.header("X-Tenant-Id", tenantId);
         }
-        builder.method(method, HttpRequest.BodyPublishers.ofString(JsonSupport.writeString(body)));
+        builder.method(method, HttpRequest.BodyPublishers.ofString(body));
         return client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 

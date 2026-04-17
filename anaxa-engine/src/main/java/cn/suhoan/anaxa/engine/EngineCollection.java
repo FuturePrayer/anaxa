@@ -4,10 +4,12 @@ import cn.suhoan.anaxa.common.error.ValidationException;
 import cn.suhoan.anaxa.common.json.JsonSupport;
 import cn.suhoan.anaxa.common.model.CollectionDefinition;
 import cn.suhoan.anaxa.common.model.CollectionStats;
+import cn.suhoan.anaxa.common.model.PartialUpdateVector;
 import cn.suhoan.anaxa.common.model.SearchHit;
 import cn.suhoan.anaxa.common.model.SearchRequest;
 import cn.suhoan.anaxa.common.model.SearchResponse;
 import cn.suhoan.anaxa.common.model.UpsertVector;
+import cn.suhoan.anaxa.common.util.PayloadPatches;
 import cn.suhoan.anaxa.index.SearchMode;
 import cn.suhoan.anaxa.index.SearchableVectors;
 import cn.suhoan.anaxa.index.SegmentIndexSearcher;
@@ -52,6 +54,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 final class EngineCollection implements AutoCloseable {
     private static final int AUTO_COMPACTION_SEGMENT_THRESHOLD = 4;
+    private static final long STARTUP_WARM_BUDGET_BYTES = 256L * 1024L * 1024L;
+    private static final long MIN_ADAPTIVE_FLUSH_THRESHOLD_BYTES = 512L * 1024L;
+    private static final int MIN_ADAPTIVE_FLUSH_MUTATIONS = 256;
+    private static final int MAX_ADAPTIVE_FLUSH_MUTATIONS = 4_096;
+    private static final long STALE_VERSION_COMPACTION_THRESHOLD = 512L;
+    private static final long TOMBSTONE_COMPACTION_THRESHOLD = 256L;
+    private static final double TOMBSTONE_RATIO_COMPACTION_THRESHOLD = 0.15D;
     private static final Comparator<ImmutableSegment> SEGMENT_ORDER = Comparator.comparingLong(ImmutableSegment::generation);
 
     private final CollectionDefinition definition;
@@ -68,6 +77,10 @@ final class EngineCollection implements AutoCloseable {
     private final AtomicBoolean compactionInProgress;
     private final AtomicBoolean closed;
     private final AtomicInteger activeSearches;
+    private final AtomicLong liveVectorCount;
+    private final AtomicLong tombstoneCount;
+    private final AtomicLong staleVersionDebt;
+    private final AtomicLong tombstoneDebt;
     private final ExecutorService flushExecutor;
     private final QueryCache queryCache;
     private final Object searchLifecycleMonitor;
@@ -100,6 +113,12 @@ final class EngineCollection implements AutoCloseable {
         this.compactionInProgress = new AtomicBoolean(false);
         this.closed = new AtomicBoolean(false);
         this.activeSearches = new AtomicInteger(0);
+        long initialLiveVectorCount = latestStates.values().stream().filter(state -> !state.tombstone()).count();
+        long initialTombstoneCount = latestStates.size() - initialLiveVectorCount;
+        this.liveVectorCount = new AtomicLong(initialLiveVectorCount);
+        this.tombstoneCount = new AtomicLong(initialTombstoneCount);
+        this.staleVersionDebt = new AtomicLong(Math.max(0L, persistedEntryCount(segments) - latestStates.size()));
+        this.tombstoneDebt = new AtomicLong(persistedTombstoneCount(segments));
         this.flushExecutor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("anaxa-flush-", 0).factory());
         this.queryCache = new QueryCache(128);
         this.searchLifecycleMonitor = new Object();
@@ -209,10 +228,13 @@ final class EngineCollection implements AutoCloseable {
         for (WalRecord record : recoveredRecords) {
             if (record.tombstone()) {
                 collection.activeMemTable.tombstone(record.id(), record.sequence());
+                collection.replaceLatestState(record.id(), EntryState.tombstone(record.sequence()));
+            } else if (record.payloadPatch()) {
+                collection.applyRecoveredPayloadPatch(record);
             } else {
                 collection.activeMemTable.upsert(record.id(), record.vector(), record.payload(), record.sequence());
+                collection.replaceLatestState(record.id(), EntryState.live(record.sequence()));
             }
-            collection.latestStates.merge(record.id(), EntryState.of(record.sequence(), record.tombstone()), EngineCollection::newerState);
             collection.sequenceGenerator.updateAndGet(current -> Math.max(current, record.sequence()));
         }
 
@@ -229,25 +251,17 @@ final class EngineCollection implements AutoCloseable {
         }
 
         collection.activeWal = WalAppender.open(paths.activeWal(), definition.dimension());
+        collection.scheduleResidentWarmup();
         return collection;
     }
 
     CollectionStats stats() {
-        long liveVectorCount = 0L;
-        long tombstoneCount = 0L;
-        for (EntryState state : latestStates.values()) {
-            if (state.tombstone()) {
-                tombstoneCount++;
-            } else {
-                liveVectorCount++;
-            }
-        }
         return new CollectionStats(
                 definition.name(),
                 definition.dimension(),
                 definition.metric(),
-                liveVectorCount,
-                tombstoneCount,
+                liveVectorCount.get(),
+                tombstoneCount.get(),
                 segments.size(),
                 flushInProgress.get() || !pendingFlushMemTables.isEmpty(),
                 compactionInProgress.get(),
@@ -282,6 +296,22 @@ final class EngineCollection implements AutoCloseable {
         return bytes;
     }
 
+    long estimatePartialUpdateBytes(List<PartialUpdateVector> updates) {
+        ensureHealthy();
+        stateLock.readLock().lock();
+        try {
+            long bytes = 0L;
+            for (PartialUpdateVector update : normalizePartialUpdates(updates)) {
+                ResolvedDocument current = resolveLiveDocument(update.id());
+                Map<String, Object> mergedPayload = PayloadPatches.merge(current.payload(), update.payload());
+                bytes += estimateFootprint(update.id(), mergedPayload, definition.dimension());
+            }
+            return bytes;
+        } finally {
+            stateLock.readLock().unlock();
+        }
+    }
+
     void upsert(List<UpsertVector> vectors) {
         ensureHealthy();
         stateLock.writeLock().lock();
@@ -290,13 +320,16 @@ final class EngineCollection implements AutoCloseable {
             List<WalRecord> walRecords = new ArrayList<>(vectors.size());
             for (UpsertVector vector : vectors) {
                 long sequence = sequenceGenerator.incrementAndGet();
-                walRecords.add(WalRecord.live(vector.id(), vector.vector(), vector.payload(), sequence));
+                walRecords.add(WalRecord.liveTrusted(vector.id(), vector.vector(), vector.payload(), sequence));
             }
 
             activeWal.appendAll(walRecords);
             for (WalRecord record : walRecords) {
+                if (latestStates.containsKey(record.id())) {
+                    staleVersionDebt.incrementAndGet();
+                }
                 activeMemTable.upsert(record.id(), record.vector(), record.payload(), record.sequence());
-                latestStates.put(record.id(), EntryState.live(record.sequence()));
+                replaceLatestState(record.id(), EntryState.live(record.sequence()));
             }
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to append WAL for collection " + definition.name(), exception);
@@ -305,7 +338,7 @@ final class EngineCollection implements AutoCloseable {
         }
 
         queryCache.clear();
-        maybeScheduleFlush();
+        handleMutationFlushPressure();
     }
 
     void delete(List<String> ids) {
@@ -329,8 +362,10 @@ final class EngineCollection implements AutoCloseable {
 
             activeWal.appendAll(walRecords);
             for (WalRecord record : walRecords) {
+                staleVersionDebt.incrementAndGet();
+                tombstoneDebt.incrementAndGet();
                 activeMemTable.tombstone(record.id(), record.sequence());
-                latestStates.put(record.id(), EntryState.tombstone(record.sequence()));
+                replaceLatestState(record.id(), EntryState.tombstone(record.sequence()));
             }
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to append delete tombstones for collection " + definition.name(), exception);
@@ -339,7 +374,38 @@ final class EngineCollection implements AutoCloseable {
         }
 
         queryCache.clear();
-        maybeScheduleFlush();
+        handleMutationFlushPressure();
+    }
+
+    void partialUpdate(List<PartialUpdateVector> updates) {
+        ensureHealthy();
+        stateLock.writeLock().lock();
+        try {
+            List<PartialUpdateVector> normalizedUpdates = normalizePartialUpdates(updates);
+            ArrayList<ResolvedDocument> resolvedDocuments = new ArrayList<>(normalizedUpdates.size());
+            ArrayList<WalRecord> walRecords = new ArrayList<>(normalizedUpdates.size());
+            for (PartialUpdateVector update : normalizedUpdates) {
+                ResolvedDocument current = resolveLiveDocument(update.id());
+                Map<String, Object> mergedPayload = PayloadPatches.merge(current.payload(), update.payload());
+                long sequence = sequenceGenerator.incrementAndGet();
+                walRecords.add(WalRecord.payloadPatchTrusted(update.id(), update.payload(), sequence));
+                resolvedDocuments.add(new ResolvedDocument(update.id(), sequence, current.vector(), mergedPayload));
+            }
+
+            activeWal.appendAll(walRecords);
+            for (ResolvedDocument resolved : resolvedDocuments) {
+                staleVersionDebt.incrementAndGet();
+                activeMemTable.upsert(resolved.id(), resolved.vector(), resolved.payload(), resolved.sequence());
+                replaceLatestState(resolved.id(), EntryState.live(resolved.sequence()));
+            }
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to append payload updates for collection " + definition.name(), exception);
+        } finally {
+            stateLock.writeLock().unlock();
+        }
+
+        queryCache.clear();
+        handleMutationFlushPressure();
     }
 
     void compact() {
@@ -407,15 +473,29 @@ final class EngineCollection implements AutoCloseable {
                 stateLock.readLock().unlock();
             }
 
-            try (StructuredTaskScope<SourceSearchResult, List<SourceSearchResult>> scope = StructuredTaskScope.open(
-                    StructuredTaskScope.Joiner.<SourceSearchResult>allSuccessfulOrThrow())) {
-                for (SearchableVectors source : sources) {
-                    if (source.size() > 0) {
-                        scope.fork(() -> searcher.search(source, request, this::isLiveEntry));
+            List<SearchableVectors> activeSources = sources.stream()
+                    .filter(source -> source.size() > 0)
+                    .toList();
+
+            try {
+                ArrayList<SourceSearchResult> partialResults = new ArrayList<>(activeSources.size());
+                if (activeSources.size() == 1) {
+                    partialResults.add(searcher.search(activeSources.getFirst(), request, this::isLiveEntry));
+                } else if (activeSources.size() > 1) {
+                    SearchableVectors inlineSource = selectInlineSource(activeSources);
+                    try (StructuredTaskScope<SourceSearchResult, List<SourceSearchResult>> scope = StructuredTaskScope.open(
+                            StructuredTaskScope.Joiner.<SourceSearchResult>allSuccessfulOrThrow())) {
+                        for (SearchableVectors source : activeSources) {
+                            if (source != inlineSource) {
+                                scope.fork(() -> searcher.search(source, request, this::isLiveEntry));
+                            }
+                        }
+                        SourceSearchResult inlineResult = searcher.search(inlineSource, request, this::isLiveEntry);
+                        partialResults.addAll(scope.join());
+                        partialResults.add(inlineResult);
                     }
                 }
 
-                List<SourceSearchResult> partialResults = scope.join();
                 TopKAccumulator accumulator = new TopKAccumulator(request.topK());
                 int exactSourceCount = 0;
                 int approximateSourceCount = 0;
@@ -563,14 +643,27 @@ final class EngineCollection implements AutoCloseable {
     }
 
     private void maybeScheduleFlush() {
+        if (activeMemTable.mutationCount() >= effectiveFlushMutationThreshold()) {
+            scheduleFlush(true);
+            return;
+        }
         scheduleFlush(false);
+    }
+
+    private void handleMutationFlushPressure() {
+        if (activeMemTable.mutationCount() >= effectiveFlushMutationThreshold() && staleVersionDebt.get() >= 64L) {
+            scheduleFlush(true);
+            awaitPendingFlushes();
+            return;
+        }
+        maybeScheduleFlush();
     }
 
     private void scheduleFlush(boolean force) {
         if (backgroundFailure != null) {
             return;
         }
-        if (!force && activeMemTable.approximateBytes() < definition.flushThresholdBytes()) {
+        if (!force && !shouldFlushActiveMemTable()) {
             return;
         }
         if (!flushInProgress.compareAndSet(false, true)) {
@@ -582,7 +675,7 @@ final class EngineCollection implements AutoCloseable {
         stateLock.writeLock().lock();
         try {
             if (backgroundFailure != null
-                    || (!force && activeMemTable.approximateBytes() < definition.flushThresholdBytes())
+                    || (!force && !shouldFlushActiveMemTable())
                     || (force && activeMemTable.size() == 0)) {
                 flushInProgress.set(false);
                 return;
@@ -614,7 +707,7 @@ final class EngineCollection implements AutoCloseable {
         try {
             ImmutableSegment segment = SegmentWriter.write(paths, definition, frozenMemTable);
             if (segment != null) {
-                searcher.warm(segment);
+                warmSourceBestEffort(segment);
             }
             stateLock.writeLock().lock();
             try {
@@ -648,12 +741,13 @@ final class EngineCollection implements AutoCloseable {
             flushInProgress.set(false);
             if (backgroundFailure == null) {
                 maybeScheduleFlush();
+                maybeScheduleCompaction();
             }
         }
     }
 
     private void maybeScheduleCompaction() {
-        if (backgroundFailure != null || closed.get() || segments.size() < AUTO_COMPACTION_SEGMENT_THRESHOLD) {
+        if (backgroundFailure != null || closed.get() || !shouldCompact()) {
             return;
         }
         if (!compactionInProgress.compareAndSet(false, true)) {
@@ -677,6 +771,104 @@ final class EngineCollection implements AutoCloseable {
         });
     }
 
+    private boolean shouldFlushActiveMemTable() {
+        return activeMemTable.approximateBytes() >= effectiveFlushThresholdBytes()
+                || activeMemTable.mutationCount() >= effectiveFlushMutationThreshold();
+    }
+
+    private long effectiveFlushThresholdBytes() {
+        long baseThresholdBytes = definition.flushThresholdBytes();
+        long threshold = baseThresholdBytes;
+        if (activeMemTable.size() > 0) {
+            double tombstoneRatio = activeMemTable.tombstoneEntryCount() / (double) activeMemTable.size();
+            if (tombstoneRatio >= 0.5D) {
+                threshold = Math.max(MIN_ADAPTIVE_FLUSH_THRESHOLD_BYTES, baseThresholdBytes / 8L);
+            } else if (tombstoneRatio >= 0.25D || staleVersionDebt.get() >= STALE_VERSION_COMPACTION_THRESHOLD / 2L) {
+                threshold = Math.max(MIN_ADAPTIVE_FLUSH_THRESHOLD_BYTES, baseThresholdBytes / 4L);
+            } else if (activeMemTable.mutationCount() >= effectiveFlushMutationThreshold() / 2L) {
+                threshold = Math.max(MIN_ADAPTIVE_FLUSH_THRESHOLD_BYTES, baseThresholdBytes / 2L);
+            }
+        }
+        return Math.min(baseThresholdBytes, threshold);
+    }
+
+    private int effectiveFlushMutationThreshold() {
+        int dimension = definition.dimension();
+        int baseThreshold;
+        if (dimension >= 1_536) {
+            baseThreshold = 256;
+        } else if (dimension >= 768) {
+            baseThreshold = 512;
+        } else if (dimension >= 384) {
+            baseThreshold = 512;
+        } else {
+            baseThreshold = 256;
+        }
+        if (activeMemTable.size() > 0 && activeMemTable.tombstoneEntryCount() * 4L >= activeMemTable.size()) {
+            baseThreshold /= 2;
+        }
+        if (staleVersionDebt.get() >= 64L) {
+            baseThreshold = Math.min(baseThreshold, 256);
+        }
+        if (staleVersionDebt.get() >= STALE_VERSION_COMPACTION_THRESHOLD) {
+            baseThreshold /= 2;
+        }
+        return Math.max(MIN_ADAPTIVE_FLUSH_MUTATIONS, Math.min(MAX_ADAPTIVE_FLUSH_MUTATIONS, baseThreshold));
+    }
+
+    private boolean shouldCompact() {
+        if (segments.size() < 2 || flushInProgress.get() || !pendingFlushMemTables.isEmpty()) {
+            return false;
+        }
+        if (segments.size() >= AUTO_COMPACTION_SEGMENT_THRESHOLD) {
+            return true;
+        }
+        long liveCount = liveVectorCount.get();
+        long tombstoneCountSnapshot = tombstoneCount.get();
+        long totalCount = liveCount + tombstoneCountSnapshot;
+        double tombstoneRatio = totalCount == 0L ? 0D : tombstoneCountSnapshot / (double) totalCount;
+        return tombstoneDebt.get() >= TOMBSTONE_COMPACTION_THRESHOLD
+                || staleVersionDebt.get() >= Math.max(STALE_VERSION_COMPACTION_THRESHOLD, liveCount / 2L)
+                || tombstoneRatio >= TOMBSTONE_RATIO_COMPACTION_THRESHOLD;
+    }
+
+    private void scheduleResidentWarmup() {
+        if (segments.isEmpty()) {
+            return;
+        }
+        List<ImmutableSegment> warmupSnapshot = List.copyOf(segments);
+        flushExecutor.submit(() -> {
+            long warmedBytes = 0L;
+            for (int index = warmupSnapshot.size() - 1; index >= 0; index--) {
+                ImmutableSegment segment = warmupSnapshot.get(index);
+                long segmentBytes = Math.max(1L, segment.approximateBytes());
+                if (warmedBytes > 0L && warmedBytes + segmentBytes > STARTUP_WARM_BUDGET_BYTES) {
+                    break;
+                }
+                beginSearch();
+                try {
+                    warmSourceBestEffort(segment);
+                } finally {
+                    endSearch();
+                }
+                warmedBytes += segmentBytes;
+            }
+        });
+    }
+
+    private void warmSourceBestEffort(SearchableVectors source) {
+        try {
+            searcher.warm(source);
+        } catch (RuntimeException exception) {
+            searcher.evict(source.sourceId());
+        }
+    }
+
+    private void refreshCompactionPressure() {
+        staleVersionDebt.set(Math.max(0L, persistedEntryCount(segments) - latestStates.size()));
+        tombstoneDebt.set(persistedTombstoneCount(segments));
+    }
+
     private void validateDimensions(List<UpsertVector> vectors) {
         for (UpsertVector vector : vectors) {
             if (vector.vector().length != definition.dimension()) {
@@ -686,6 +878,56 @@ final class EngineCollection implements AutoCloseable {
                 );
             }
         }
+    }
+
+    private void applyRecoveredPayloadPatch(WalRecord record) {
+        ResolvedDocument current = resolveLiveDocument(record.id());
+        Map<String, Object> mergedPayload = PayloadPatches.merge(current.payload(), record.payload());
+        activeMemTable.upsert(record.id(), current.vector(), mergedPayload, record.sequence());
+        replaceLatestState(record.id(), EntryState.live(record.sequence()));
+    }
+
+    private List<PartialUpdateVector> normalizePartialUpdates(List<PartialUpdateVector> updates) {
+        LinkedHashSet<String> orderedIds = new LinkedHashSet<>();
+        HashMap<String, Map<String, Object>> mergedPayloads = new HashMap<>();
+        for (PartialUpdateVector update : updates) {
+            orderedIds.add(update.id());
+            mergedPayloads.merge(update.id(), update.payload(), PayloadPatches::merge);
+        }
+        return orderedIds.stream()
+                .map(id -> new PartialUpdateVector(id, mergedPayloads.get(id)))
+                .toList();
+    }
+
+    private ResolvedDocument resolveLiveDocument(String id) {
+        EntryState state = latestStates.get(id);
+        if (state == null || state.tombstone()) {
+            throw new ValidationException("Vector " + id + " does not exist or has been deleted");
+        }
+
+        MemTableEntry activeEntry = activeMemTable.entry(id);
+        if (activeEntry != null && activeEntry.sequence() == state.sequence() && !activeEntry.tombstone()) {
+            return new ResolvedDocument(id, state.sequence(), activeEntry.vector(), activeEntry.payload());
+        }
+
+        for (int index = pendingFlushMemTables.size() - 1; index >= 0; index--) {
+            MemTableEntry entry = pendingFlushMemTables.get(index).entry(id);
+            if (entry != null && entry.sequence() == state.sequence() && !entry.tombstone()) {
+                return new ResolvedDocument(id, state.sequence(), entry.vector(), entry.payload());
+            }
+        }
+
+        for (int index = segments.size() - 1; index >= 0; index--) {
+            ImmutableSegment segment = segments.get(index);
+            SegmentEntry entry = segment.entry(id);
+            if (entry != null && entry.sequence() == state.sequence() && !entry.tombstone()) {
+                return new ResolvedDocument(id, state.sequence(), segment.vector(entry), entry.payload());
+            }
+        }
+
+        throw new IllegalStateException(
+                "Failed to resolve live vector state for " + id + " in collection " + definition.name()
+        );
     }
 
     private void compactSegments() throws IOException {
@@ -713,7 +955,7 @@ final class EngineCollection implements AutoCloseable {
                 ? null
                 : SegmentWriter.write(paths, definition, generationCounter.incrementAndGet(), compactedEntries);
         if (compactedSegment != null) {
-            searcher.warm(compactedSegment);
+            warmSourceBestEffort(compactedSegment);
         }
 
         stateLock.writeLock().lock();
@@ -727,6 +969,7 @@ final class EngineCollection implements AutoCloseable {
             stateLock.writeLock().unlock();
         }
 
+        refreshCompactionPressure();
         awaitActiveSearches();
         RuntimeException cleanupFailure = null;
         for (ImmutableSegment candidate : candidates) {
@@ -775,9 +1018,7 @@ final class EngineCollection implements AutoCloseable {
                 if (!entry.tombstone()) {
                     continue;
                 }
-                latestStates.computeIfPresent(entry.id(), (id, state) ->
-                        state.tombstone() && state.sequence() == entry.sequence() ? null : state
-                );
+                removeLatestTombstoneState(entry.id(), entry.sequence());
             }
         }
     }
@@ -801,6 +1042,18 @@ final class EngineCollection implements AutoCloseable {
     private boolean isLiveEntry(String id, Long sequence) {
         EntryState state = latestStates.get(id);
         return state != null && state.sequence() == sequence;
+    }
+
+    private SearchableVectors selectInlineSource(List<SearchableVectors> sources) {
+        SearchableVectors inlineSource = null;
+        int largestSize = -1;
+        for (SearchableVectors source : sources) {
+            if (source.size() > largestSize) {
+                largestSize = source.size();
+                inlineSource = source;
+            }
+        }
+        return Objects.requireNonNull(inlineSource, "inlineSource");
     }
 
     private void ensureHealthy() {
@@ -869,6 +1122,38 @@ final class EngineCollection implements AutoCloseable {
 
     private static EntryState newerState(EntryState left, EntryState right) {
         return left.sequence() >= right.sequence() ? left : right;
+    }
+
+    private void replaceLatestState(String id, EntryState next) {
+        EntryState previous = latestStates.put(id, next);
+        adjustStateCounts(previous, next);
+    }
+
+    private void removeLatestTombstoneState(String id, long sequence) {
+        latestStates.computeIfPresent(id, (ignored, state) -> {
+            if (state.tombstone() && state.sequence() == sequence) {
+                adjustStateCounts(state, null);
+                return null;
+            }
+            return state;
+        });
+    }
+
+    private void adjustStateCounts(EntryState previous, EntryState next) {
+        if (previous != null) {
+            if (previous.tombstone()) {
+                tombstoneCount.decrementAndGet();
+            } else {
+                liveVectorCount.decrementAndGet();
+            }
+        }
+        if (next != null) {
+            if (next.tombstone()) {
+                tombstoneCount.incrementAndGet();
+            } else {
+                liveVectorCount.incrementAndGet();
+            }
+        }
     }
 
     private RuntimeException closeQuietly(AutoCloseable closeable, RuntimeException failure) {
@@ -962,6 +1247,26 @@ final class EngineCollection implements AutoCloseable {
         return id.getBytes(StandardCharsets.UTF_8).length + payloadBytes + (dimension * Float.BYTES) + Integer.BYTES;
     }
 
+    private static long persistedEntryCount(List<ImmutableSegment> segments) {
+        long count = 0L;
+        for (ImmutableSegment segment : segments) {
+            count += segment.entries().size();
+        }
+        return count;
+    }
+
+    private static long persistedTombstoneCount(List<ImmutableSegment> segments) {
+        long count = 0L;
+        for (ImmutableSegment segment : segments) {
+            for (SegmentEntry entry : segment.entries()) {
+                if (entry.tombstone()) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
     private record EntryState(long sequence, boolean tombstone) {
         private static EntryState of(long sequence, boolean tombstone) {
             return new EntryState(sequence, tombstone);
@@ -974,6 +1279,9 @@ final class EngineCollection implements AutoCloseable {
         private static EntryState tombstone(long sequence) {
             return new EntryState(sequence, true);
         }
+    }
+
+    private record ResolvedDocument(String id, long sequence, float[] vector, Map<String, Object> payload) {
     }
 
     private static final class QueryCache {

@@ -25,6 +25,8 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
     private final Arena arena;
     private final ConcurrentHashMap<String, MemTableEntry> entries;
     private final LongAdder approximateBytes;
+    private final LongAdder mutationCount;
+    private final LongAdder tombstoneEntries;
     private final AtomicLong searchStateVersion;
 
     public OffHeapMemTable(CollectionDefinition definition, long generation) {
@@ -33,6 +35,8 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         this.arena = Arena.ofShared();
         this.entries = new ConcurrentHashMap<>();
         this.approximateBytes = new LongAdder();
+        this.mutationCount = new LongAdder();
+        this.tombstoneEntries = new LongAdder();
         this.searchStateVersion = new AtomicLong(0L);
     }
 
@@ -69,7 +73,11 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         approximateBytes.add(footprint);
         if (previous != null) {
             approximateBytes.add(-previous.byteFootprint());
+            if (previous.tombstone()) {
+                tombstoneEntries.add(-1L);
+            }
         }
+        mutationCount.increment();
         searchStateVersion.incrementAndGet();
     }
 
@@ -89,8 +97,26 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         approximateBytes.add(footprint);
         if (previous != null) {
             approximateBytes.add(-previous.byteFootprint());
+            if (!previous.tombstone()) {
+                tombstoneEntries.increment();
+            }
+        } else {
+            tombstoneEntries.increment();
         }
+        mutationCount.increment();
         searchStateVersion.incrementAndGet();
+    }
+
+    public MemTableEntry entry(String id) {
+        return entries.get(id);
+    }
+
+    public long mutationCount() {
+        return mutationCount.sum();
+    }
+
+    public long tombstoneEntryCount() {
+        return tombstoneEntries.sum();
     }
 
     @Override

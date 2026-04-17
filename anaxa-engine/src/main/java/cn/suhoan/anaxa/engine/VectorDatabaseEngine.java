@@ -7,6 +7,8 @@ import cn.suhoan.anaxa.common.model.CollectionDefinition;
 import cn.suhoan.anaxa.common.model.CollectionStats;
 import cn.suhoan.anaxa.common.model.CreateCollectionRequest;
 import cn.suhoan.anaxa.common.model.DeleteVectorsRequest;
+import cn.suhoan.anaxa.common.model.PartialUpdateVector;
+import cn.suhoan.anaxa.common.model.PartialUpdateVectorsRequest;
 import cn.suhoan.anaxa.common.model.SearchRequest;
 import cn.suhoan.anaxa.common.model.SearchResponse;
 import cn.suhoan.anaxa.common.model.UpsertVector;
@@ -112,12 +114,24 @@ public final class VectorDatabaseEngine implements AutoCloseable {
         return collection(tenantId, collectionName).estimateUpsertBytes(request.vectors());
     }
 
+    public long estimatePartialUpdateBytes(String tenantId, String collectionName, PartialUpdateVectorsRequest request) {
+        return collection(tenantId, collectionName).estimatePartialUpdateBytes(request.updates());
+    }
+
     public void delete(String collectionName, DeleteVectorsRequest request) {
         delete(CollectionDefinition.DEFAULT_TENANT, collectionName, request);
     }
 
     public void delete(String tenantId, String collectionName, DeleteVectorsRequest request) {
         collection(tenantId, collectionName).delete(request.ids());
+    }
+
+    public void partialUpdate(String collectionName, PartialUpdateVectorsRequest request) {
+        partialUpdate(CollectionDefinition.DEFAULT_TENANT, collectionName, request);
+    }
+
+    public void partialUpdate(String tenantId, String collectionName, PartialUpdateVectorsRequest request) {
+        collection(tenantId, collectionName).partialUpdate(request.updates());
     }
 
     public SearchResponse search(String collectionName, SearchRequest request) {

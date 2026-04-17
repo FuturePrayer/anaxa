@@ -2,10 +2,12 @@ package cn.suhoan.anaxa.common.json;
 
 import cn.suhoan.anaxa.common.model.CreateCollectionRequest;
 import cn.suhoan.anaxa.common.model.MetricType;
+import cn.suhoan.anaxa.common.model.UpsertVector;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -36,5 +38,20 @@ class JsonSupportTest {
         );
 
         assertEquals(JsonSupport.writeBytes(payload).length, JsonSupport.estimateBytes(payload));
+    }
+
+    @Test
+    void readsNdjsonBodiesLineByLine() {
+        byte[] body = """
+                {"id":"alpha","vector":[1.0,0.0],"payload":{"tenant":"blue"}}
+
+                {"id":"beta","vector":[0.0,1.0],"payload":{"tenant":"red"}}
+                """.getBytes(StandardCharsets.UTF_8);
+        ArrayList<UpsertVector> vectors = new ArrayList<>();
+
+        JsonSupport.readNdjson(new ByteArrayInputStream(body), UpsertVector.class, vectors::add);
+
+        assertEquals(List.of("alpha", "beta"), vectors.stream().map(UpsertVector::id).toList());
+        assertEquals("red", vectors.get(1).payload().get("tenant"));
     }
 }

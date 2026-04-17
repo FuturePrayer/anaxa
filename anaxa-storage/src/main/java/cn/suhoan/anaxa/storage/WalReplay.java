@@ -15,12 +15,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public final class WalReplay {
     private static final int MAGIC = 0x57414C31;
     private static final int VERSION_LEGACY = 1;
     private static final int VERSION_TOMBSTONES = 2;
     private static final int VERSION_CHECKSUMS = 3;
+    private static final int VERSION_PAYLOAD_PATCHES = 4;
 
     private WalReplay() {
     }
@@ -44,7 +46,7 @@ public final class WalReplay {
 
     public static ReplayResult readResult(Path path, CollectionDefinition definition) throws IOException {
         if (!Files.exists(path) || Files.size(path) == 0L) {
-            return new ReplayResult(List.of(), VERSION_CHECKSUMS, false);
+            return new ReplayResult(List.of(), WalAppender.CURRENT_VERSION, false);
         }
 
         ArrayList<WalRecord> records = new ArrayList<>();
@@ -68,7 +70,7 @@ public final class WalReplay {
                     break;
                 }
 
-                if (version == VERSION_CHECKSUMS) {
+                if (version >= VERSION_CHECKSUMS) {
                     Integer checksum = tryReadInt(data);
                     if (checksum == null || checksum != WalAppender.checksum(body)) {
                         recoveredTail = true;
@@ -111,8 +113,9 @@ public final class WalReplay {
         buffer.get(idBytes);
 
         boolean tombstone = (flags & WalAppender.FLAG_TOMBSTONE) != 0;
-        float[] vector = tombstone ? new float[0] : new float[definition.dimension()];
-        if (!tombstone) {
+        boolean payloadPatch = version >= VERSION_PAYLOAD_PATCHES && (flags & WalAppender.FLAG_PAYLOAD_PATCH) != 0;
+        float[] vector = tombstone || payloadPatch ? new float[0] : new float[definition.dimension()];
+        if (!tombstone && !payloadPatch) {
             for (int index = 0; index < vector.length; index++) {
                 vector[index] = buffer.getFloat();
             }
@@ -121,21 +124,26 @@ public final class WalReplay {
         byte[] payloadBytes = new byte[payloadLength];
         buffer.get(payloadBytes);
 
-        return tombstone
-                ? WalRecord.tombstone(new String(idBytes, StandardCharsets.UTF_8), sequence)
-                : WalRecord.live(
-                new String(idBytes, StandardCharsets.UTF_8),
-                vector,
-                JsonSupport.readMap(payloadBytes),
-                sequence
-        );
+        String id = new String(idBytes, StandardCharsets.UTF_8);
+        Map<String, Object> payload = JsonSupport.readMap(payloadBytes);
+        if (tombstone) {
+            return WalRecord.tombstone(id, sequence);
+        }
+        if (payloadPatch) {
+            return WalRecord.payloadPatchTrusted(id, payload, sequence);
+        }
+        return WalRecord.liveTrusted(id, vector, payload, sequence);
     }
 
     private static int validateHeader(DataInputStream data, int expectedDimension) throws IOException {
         int magic = data.readInt();
         int version = data.readInt();
         int dimension = data.readInt();
-        if (magic != MAGIC || (version != VERSION_LEGACY && version != VERSION_TOMBSTONES && version != VERSION_CHECKSUMS)) {
+        if (magic != MAGIC
+                || (version != VERSION_LEGACY
+                && version != VERSION_TOMBSTONES
+                && version != VERSION_CHECKSUMS
+                && version != VERSION_PAYLOAD_PATCHES)) {
             throw new IOException("Invalid WAL header");
         }
         if (dimension != expectedDimension) {

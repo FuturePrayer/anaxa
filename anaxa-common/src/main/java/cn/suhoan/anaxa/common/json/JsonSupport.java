@@ -4,11 +4,14 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.lang.reflect.Array;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.function.Consumer;
 
 public final class JsonSupport {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
@@ -51,6 +54,28 @@ public final class JsonSupport {
             return MAPPER.readValue(input, type);
         } catch (Exception exception) {
             throw new IllegalArgumentException("Failed to deserialize JSON body", exception);
+        }
+    }
+
+    public static <T> void readNdjson(InputStream input, Class<T> type, Consumer<T> consumer) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            String line;
+            int lineNumber = 0;
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
+                if (line.isBlank()) {
+                    continue;
+                }
+                try {
+                    consumer.accept(MAPPER.readValue(line, type));
+                } catch (Exception exception) {
+                    throw new IllegalArgumentException("Failed to deserialize NDJSON line " + lineNumber, exception);
+                }
+            }
+        } catch (IllegalArgumentException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new IllegalArgumentException("Failed to deserialize NDJSON body", exception);
         }
     }
 
