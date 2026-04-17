@@ -1134,6 +1134,135 @@ java --enable-preview --add-modules jdk.incubator.vector ^
 3. 汇总表格
 4. 自动生成的 observations，用来帮助判断 flush / compaction / 维度变化对冷启动和稳态 QPS 的影响
 
+#### 8.14.1 benchmark 场景是怎么组织的
+
+Java benchmark 会按 `profile -> scenario -> family` 这三层来组织报告：
+
+| 层级 | 含义 |
+| --- | --- |
+| `profile` | 一组预置评测组合，例如 `quick`、`standard`、`markdown-kb`、`full` |
+| `scenario` | 一条具体压测用例，例如 `kb-medium-flush` |
+| `family` | 一组可横向对比的同类场景，例如 `kb-medium` 下会比较 `none` 和 `flush` |
+
+当前各个 profile 默认包含的场景如下：
+
+| profile | 场景 | 用途 |
+| --- | --- | --- |
+| `quick` | `general-small` | 通用小规模基线，快速感知当前机器的基本 ingest / search 能力 |
+| `quick` | `kb-medium-unprepared` | 中等规模 Markdown 知识库场景，不做导入后准备 |
+| `quick` | `kb-medium-flush` | 中等规模 Markdown 知识库场景，导入后先 flush |
+| `standard` | `general-small` | 默认通用基线 |
+| `standard` | `kb-medium-unprepared` / `kb-medium-flush` | 中等规模知识库，对比是否 flush |
+| `standard` | `kb-large-unprepared` / `kb-large-flush` | 更接近真实知识库规模的 768 维场景，对比是否 flush |
+| `markdown-kb` | `kb-standard-unprepared` / `kb-standard-flush` / `kb-standard-flush-compact` | 专门评估 Markdown 知识库导入后 `none / flush / flush+compact` 的差异 |
+| `full` | `general-small`、`kb-medium-*`、`kb-large-*`、`kb-xlarge-*` | 更重的全量摸底，适合做更完整的机器能力评估 |
+
+场景名中的关键部分含义：
+
+| 片段 | 含义 |
+| --- | --- |
+| `general` | 通用向量检索基线，不强调 Markdown 知识库特征 |
+| `kb` | Markdown / 文档知识库类场景，默认启用 payload filter |
+| `small` / `medium` / `large` / `xlarge` | 问题规模档位，维度、向量数、并发度会逐步增加 |
+| `standard` | `markdown-kb` profile 下的默认知识库档位，等价于一组固定的 768 维、30k 向量配置 |
+| `unprepared` | 导入后不额外执行 `flush` / `compact`，直接开始搜 |
+| `flush` | 导入后先执行 `flush`，再开始搜 |
+| `flush-compact` | 导入后先 `flush` 再 `compact`，再开始搜 |
+
+报告中的 `prepare_mode` / `summary.prepare` 字段与上面的场景后缀一一对应：
+
+| 值 | 含义 |
+| --- | --- |
+| `none` | 不做额外准备 |
+| `flush` | 执行一次 `POST /collections/{name}/flush` |
+| `flush,compact` | 先 `flush` 再 `compact` |
+
+#### 8.14.2 `[environment]` 段各字段含义
+
+| 字段 | 含义 |
+| --- | --- |
+| `profile` | 本次使用的预置评测组合 |
+| `server_mode` | `embedded` 表示 benchmark 自己拉起临时服务；`remote` 表示连接已有服务 |
+| `base_url` | 本次压测实际访问的服务地址 |
+| `run_id` | 本次 benchmark 运行唯一标识 |
+| `data_dir` | 本次 benchmark 使用的数据目录；内嵌模式下通常是 `--data-dir` 下的一个 run 子目录 |
+| `java_runtime` | 实际运行 benchmark / server 的 JDK 版本 |
+| `vm_name` | JVM 名称 |
+| `os` | 操作系统名称和版本 |
+| `available_cpu` | JVM 看到的可用 CPU 核数 |
+| `max_heap_bytes` | JVM 最大堆大小上限 |
+| `total_heap_bytes` | 当前已经向操作系统申请到的堆大小 |
+| `free_heap_bytes` | 当前堆里尚未使用的可用字节数 |
+
+#### 8.14.3 `[scenario:xxx]` 段各字段含义
+
+每个 `scenario` 都代表一组完整的“建集合 -> 写入 -> 可选 prepare -> warmup -> measured-search”流程。
+
+| 字段 | 含义 |
+| --- | --- |
+| `collection` | benchmark 为该场景自动生成的 collection 名 |
+| `family` | 用于横向比较的场景分组，同一 family 里的不同 `prepare_mode` 会在 `observations` 中自动对比 |
+| `prepare_mode` | 当前场景在写入结束后采取的准备动作，见上表 |
+| `dimension` | 向量维度 |
+| `vectors` | 本场景总写入向量数 |
+| `search_workers` | 并发查询 worker 数 |
+| `use_filter` | 检索时是否附带 payload filter |
+| `ingest_seconds` | 全部向量写入完成耗时 |
+| `ingest_vps` | 写入吞吐，单位 vectors/sec |
+| `prepare_seconds` | prepare 阶段耗时；只有 `flush` / `flush,compact` 场景会出现 |
+| `warmup_seconds` | warmup 阶段总耗时 |
+| `warmup_success` | warmup 成功请求数 / 总请求数 |
+| `warmup_qps` | warmup 阶段成功请求吞吐；用于衡量“第一次准备读”阶段的整体速度 |
+| `warmup_p50_ms` / `warmup_p95_ms` / `warmup_p99_ms` / `warmup_max_ms` | warmup 阶段延迟分位数和最大值；特别适合看冷启动尖峰 |
+| `warmup_status` | warmup 阶段状态码分布；正常情况下通常是 `{"200":...}`，如果出现异常也会反映在这里 |
+| `measured-search_seconds` | 正式测量阶段总耗时 |
+| `measured-search_success` | 正式测量阶段成功请求数 / 总请求数 |
+| `measured-search_qps` | 正式测量阶段成功请求吞吐，可视为稳态 successful QPS |
+| `measured-search_p50_ms` / `measured-search_p95_ms` / `measured-search_p99_ms` / `measured-search_max_ms` | 正式测量阶段延迟分位数和最大值，用于观察稳态搜索延迟 |
+| `measured-search_status` | 正式测量阶段状态码分布 |
+| `segments` | 场景结束时 collection 内持久化 Segment 数量；可以帮助判断 flush / compaction 后的数据形态 |
+| `storage_bytes` | 场景结束时 collection 估算占用字节数 |
+
+其中：
+
+| 阶段 | 更适合看什么 |
+| --- | --- |
+| `warmup` | 导入完成后第一次对外提供查询时的冷启动成本 |
+| `measured-search` | 缓存、页加载、索引准备完成后的稳态表现 |
+
+#### 8.14.4 `[summary]` 段各列含义
+
+`[summary]` 会把最关键的对比指标压成一张表：
+
+| 列 | 含义 |
+| --- | --- |
+| `scenario` | 场景名 |
+| `prepare` | 当前场景的 prepare 模式 |
+| `dim` | 向量维度 |
+| `vectors` | 总向量数 |
+| `workers` | 并发搜索 worker 数 |
+| `filter` | 是否启用 filter |
+| `ingest_vps` | 写入吞吐 |
+| `warmup_p99` | warmup p99 延迟，最适合用来观察“导入后首次查询”的尖峰 |
+| `measured_qps` | 稳态 successful QPS |
+| `measured_p99` | 稳态 p99 延迟 |
+
+#### 8.14.5 `[observations]` 段各行含义
+
+`[observations]` 不是原始指标，而是 benchmark 基于场景结果自动生成的结论摘要，当前主要会输出两类信息：
+
+| 类型 | 含义 |
+| --- | --- |
+| `Best steady-state throughput ...` | 本次所有场景里稳态吞吐最高的是哪一个 |
+| `family: flush changed ...` / `flush+compact added ...` | 同一 family 内不同 prepare 模式的对比结论，例如 flush 是否降低 warmup p99、flush+compact 是否值得这段额外 prepare 时间 |
+
+如果你想判断“这个环境更适合直接读、flush 后读，还是 flush+compact 后读”，优先看：
+
+1. `warmup_p99`
+2. `measured_qps`
+3. `measured_p99`
+4. `prepare_seconds`
+
 ## 9. 当前实现与架构愿景的差距
 
 当前版本已经把独立式进程、堆外向量存储、虚拟线程、结构化并发、SIMD 计算这些关键骨架搭起来了，但离完整的高性能向量数据库还有差距。
