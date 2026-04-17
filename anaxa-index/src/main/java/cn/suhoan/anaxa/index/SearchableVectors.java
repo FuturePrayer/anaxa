@@ -19,5 +19,12 @@ public interface SearchableVectors {
 
     int size();
 
+    default long approximateBytes() {
+        return 0L;
+    }
+
+    default void prefetch(long budgetBytes) {
+    }
+
     void scan(VectorEntryConsumer consumer);
 }

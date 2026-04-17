@@ -22,6 +22,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.BufferedInputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -215,6 +216,11 @@ public final class AnaxaHttpServer implements AutoCloseable {
             return compact(exchange, context, tenantScope.tenantId(), path.get(1));
         }
 
+        if (path.size() == 3 && "collections".equals(path.getFirst()) && "flush".equals(path.get(2))) {
+            requireMethod(method, "POST");
+            return flush(exchange, context, tenantScope.tenantId(), path.get(1));
+        }
+
         if (path.size() == 3 && "collections".equals(path.getFirst()) && "backup".equals(path.get(2))) {
             requireMethod(method, "POST");
             return backupCollection(exchange, context, tenantScope.tenantId(), path.get(1));
@@ -277,6 +283,11 @@ public final class AnaxaHttpServer implements AutoCloseable {
         return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
     }
 
+    private int flush(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
+        engine.flush(tenantId, collectionName);
+        return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
+    }
+
     private int backupCollection(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
         BackupCollectionRequest request = readBody(exchange, BackupCollectionRequest.class);
         return writeJson(
@@ -312,11 +323,14 @@ public final class AnaxaHttpServer implements AutoCloseable {
     }
 
     private <T> T readBody(HttpExchange exchange, Class<T> type) throws IOException {
-        byte[] requestBody = exchange.getRequestBody().readAllBytes();
-        if (requestBody.length == 0) {
-            throw new ValidationException("Request body must not be empty");
+        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
+            requestBody.mark(1);
+            if (requestBody.read() < 0) {
+                throw new ValidationException("Request body must not be empty");
+            }
+            requestBody.reset();
+            return JsonSupport.read(requestBody, type);
         }
-        return JsonSupport.read(requestBody, type);
     }
 
     private int writeJson(HttpExchange exchange, int statusCode, Object response, RequestContext context) throws IOException {
@@ -413,7 +427,10 @@ public final class AnaxaHttpServer implements AutoCloseable {
             case "/collections/{name}/vectors" -> Role.WRITER;
             case "/collections/{name}/deletions" -> Role.WRITER;
             case "/collections/{name}/search" -> Role.READER;
-            case "/collections/{name}/compact", "/collections/{name}/backup", "/backups/{id}/restore" -> Role.ADMIN;
+            case "/collections/{name}/flush",
+                    "/collections/{name}/compact",
+                    "/collections/{name}/backup",
+                    "/backups/{id}/restore" -> Role.ADMIN;
             default -> null;
         };
     }
@@ -437,6 +454,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 case "vectors" -> "/collections/{name}/vectors";
                 case "deletions" -> "/collections/{name}/deletions";
                 case "search" -> "/collections/{name}/search";
+                case "flush" -> "/collections/{name}/flush";
                 case "compact" -> "/collections/{name}/compact";
                 case "backup" -> "/collections/{name}/backup";
                 default -> "/unknown";

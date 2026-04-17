@@ -16,6 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32;
 
 public final class ImmutableSegment implements SearchableVectors, AutoCloseable {
@@ -27,6 +29,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
     private static final long HEADER_BYTES = Integer.BYTES + Integer.BYTES + Integer.BYTES + Integer.BYTES + Long.BYTES + Integer.BYTES;
     static final int FOOTER_MAGIC = 0x53454746;
     static final long FOOTER_BYTES = Integer.BYTES + Integer.BYTES + Long.BYTES;
+    private static final long PREFETCH_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(250L);
     private static final ValueLayout.OfInt INT_LAYOUT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
     private static final ValueLayout.OfLong LONG_LAYOUT = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
     private static final ValueLayout.OfFloat FLOAT_LAYOUT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
@@ -37,6 +40,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
     private final Arena arena;
     private final MemorySegment mappedSegment;
     private final List<SegmentEntry> entries;
+    private final AtomicLong lastPrefetchNanos;
 
     private ImmutableSegment(
             Path path,
@@ -52,6 +56,7 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         this.arena = arena;
         this.mappedSegment = mappedSegment;
         this.entries = entries;
+        this.lastPrefetchNanos = new AtomicLong(0L);
     }
 
     public static ImmutableSegment load(Path path, CollectionDefinition definition) throws IOException {
@@ -158,6 +163,27 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
     @Override
     public int size() {
         return entries.size();
+    }
+
+    @Override
+    public long approximateBytes() {
+        return mappedSegment.byteSize();
+    }
+
+    @Override
+    public void prefetch(long budgetBytes) {
+        if (budgetBytes <= 0L || mappedSegment.byteSize() > budgetBytes) {
+            return;
+        }
+
+        long now = System.nanoTime();
+        long previous = lastPrefetchNanos.get();
+        if (previous != 0L && now - previous < PREFETCH_INTERVAL_NANOS && mappedSegment.isLoaded()) {
+            return;
+        }
+        if (lastPrefetchNanos.compareAndSet(previous, now)) {
+            mappedSegment.load();
+        }
     }
 
     @Override

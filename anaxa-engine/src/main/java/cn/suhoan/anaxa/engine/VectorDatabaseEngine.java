@@ -136,6 +136,14 @@ public final class VectorDatabaseEngine implements AutoCloseable {
         collection(tenantId, collectionName).compact();
     }
 
+    public void flush(String collectionName) {
+        flush(CollectionDefinition.DEFAULT_TENANT, collectionName);
+    }
+
+    public void flush(String tenantId, String collectionName) {
+        collection(tenantId, collectionName).flush();
+    }
+
     public CollectionStats backupCollection(String collectionName, String backupId, Path backupDirectory) {
         return backupCollection(CollectionDefinition.DEFAULT_TENANT, collectionName, backupId, backupDirectory);
     }

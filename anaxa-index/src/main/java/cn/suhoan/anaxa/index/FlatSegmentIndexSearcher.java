@@ -12,8 +12,15 @@ import java.util.Map;
 import java.util.function.BiPredicate;
 
 public final class FlatSegmentIndexSearcher implements SegmentIndexSearcher {
+    private static final long PREFETCH_FLOOR_BYTES = 8L * 1024L * 1024L;
+    private static final long PREFETCH_CEILING_BYTES = 64L * 1024L * 1024L;
+
     @Override
     public SourceSearchResult search(SearchableVectors source, SearchRequest request, BiPredicate<String, Long> isLiveEntry) {
+        source.prefetch(Math.min(
+                PREFETCH_CEILING_BYTES,
+                Math.max(PREFETCH_FLOOR_BYTES, (long) source.dimension() * Math.max(1, request.topK()) * Float.BYTES * 128L)
+        ));
         ArrayList<FlatVectorRef> vectors = new ArrayList<>(source.size());
         ArrayList<Map<String, Object>> payloads = new ArrayList<>(source.size());
         source.scan((id, sequence, tombstone, norm, vectorSegment, vectorOffsetBytes, payload) -> {

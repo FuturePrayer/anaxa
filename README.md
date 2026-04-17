@@ -1,6 +1,6 @@
 # AnaxaDB
 
-AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版本已经具备可运行的单机服务形态，支持多租户 namespace、租户配额与限流、集合创建、向量写入、向量删除、基于 **HNSW + PQ** 的近似检索、持久化 ANN sidecar、Payload 倒排 + 列式过滤、查询缓存、内部阶段指标、API Key 热重载 + RBAC、审计日志、备份恢复、Prometheus 风格指标导出、JFR 事件、WAL/Segment checksum 校验、Compaction 以及重启恢复。
+AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版本已经具备可运行的单机服务形态，支持多租户 namespace、租户配额与限流、集合创建、向量写入、向量删除、流式 JSON 写入、低拷贝 WAL 追加、基于 **HNSW + PQ** 的近似检索、Segment prefetch、自适应 `efSearch` / rerank 调优、持久化 ANN sidecar、Payload 倒排 + 列式过滤、查询缓存、内部阶段指标、API Key 热重载 + RBAC、审计日志、备份恢复、Prometheus 风格指标导出、JFR 事件、WAL/Segment checksum 校验、Compaction 以及重启恢复。
 
 当前代码以 Maven 多模块组织，核心目标是让网络接入、索引计算、存储持久化和查询编排彼此解耦，方便后续继续演进到更高性能和更完整的数据库能力。
 
@@ -12,7 +12,10 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版
 - 集合创建与集合列表/统计查询
 - 向量批量写入（同一 `id` 重复写入时以后写为准）
 - 向量删除（Delete / Tombstone）
+- 基于输入流的请求体解析，避免写入接口先整体 `readAllBytes()`
+- 低拷贝 WAL 记录编码，减少写入时的中间缓冲复制
 - 基于 HNSW + PQ 的近似 Top-K 检索，并对小数据集自适应回退精确扫描
+- Segment 级 prefetch（对预算内 mmap segment 预热页缓存）
 - 持久化 Segment 级 HNSW / PQ / Payload 过滤索引 sidecar，降低冷启动重建成本
 - 基于 Payload 倒排索引 + 列式存储的增强过滤：精确匹配、`$in`、`$contains`、范围比较、布尔组合、嵌套字段
 - 多租户 namespace；不同 tenant 可复用相同 collection 名
@@ -32,6 +35,7 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前版
 - 基于 Vector API 的 SIMD 距离计算
 - Source index cache + collection query cache
 - 近似检索 rerank 裁剪与 early-stop 风格候选截断
+- 基于 source size / filter candidates / topK 的自适应 `efSearch` 与 rerank 窗口
 - Prometheus 风格 `/metrics` 指标导出
 - HTTP/JFR 请求与检索事件、慢查询统计、直方图型延迟指标
 - Flush / Compaction / Search candidate pruning / rerank / cache 命中指标
@@ -88,9 +92,10 @@ anaxa-storage            anaxa-index
 ### 3.1 写入路径
 
 1. HTTP `POST /collections/{name}/vectors` 接收批量向量。
-2. 数据先追加到 `active.wal`，每条 WAL 记录携带 checksum。
-3. 向量写入当前活跃的堆外 `MemTable`。
-4. 当 `MemTable` 估算大小超过阈值时：
+2. 请求体直接从 `InputStream` 流式反序列化为写入模型，避免先整体读成 `byte[]`。
+3. 数据追加到 `active.wal`，每条 WAL 记录携带 checksum，且写入编码过程避免额外的 body 二次缓冲复制。
+4. 向量写入当前活跃的堆外 `MemTable`。
+5. 当 `MemTable` 估算大小超过阈值时：
    - 关闭当前 WAL
    - 将其改名为 `frozen-*.wal`
    - 切换到新的活跃 `MemTable + active.wal`
@@ -110,11 +115,13 @@ anaxa-storage            anaxa-index
 1. HTTP `POST /collections/{name}/search` 接收查询向量。
 2. 引擎收集当前活跃 MemTable、待 Flush MemTable、已落盘 Segments。
 3. 查询先通过 Payload 倒排索引和列式范围索引缩小候选范围；小候选集走精确扫描，大候选集走 HNSW+PQ 近似召回。
-4. 近似召回后的候选会做 bounded rerank，并使用 SIMD 精确打分重新排序。
-5. collection 级 query cache 会缓存完全相同的查询请求；source index cache 会缓存 Segment/MemTable 的 ANN 与过滤 sidecar。
-6. 过滤表达式支持 `$and` / `$or` / `$not`、范围和数组包含，索引可命中的子句优先走倒排/列式候选生成，剩余子句再做逐条校验。
-7. 使用 `StructuredTaskScope` 并发检索每个数据源。
-8. 主线程归并所有局部 Top-K，返回最终结果，并把慢查询、query cache、source cache、candidate pruning、flush/compaction 指标写入观测面。
+4. 搜索器会根据 source size、filter candidate 数和 `topK` 自适应选择精确/近似路径，并动态调优 `efSearch` 与 rerank 窗口。
+5. 对预算内的 mmap Segment，会在搜索前触发 prefetch 预热页缓存，降低首次打分时的 page fault。
+6. 近似召回后的候选会做 bounded rerank，并使用 SIMD 精确打分重新排序。
+7. collection 级 query cache 会缓存完全相同的查询请求；source index cache 会缓存 Segment/MemTable 的 ANN 与过滤 sidecar。
+8. 过滤表达式支持 `$and` / `$or` / `$not`、范围和数组包含，索引可命中的子句优先走倒排/列式候选生成，剩余子句再做逐条校验。
+9. 使用 `StructuredTaskScope` 并发检索每个数据源。
+10. 主线程归并所有局部 Top-K，返回最终结果，并把慢查询、query cache、source cache、candidate pruning、flush/compaction 指标写入观测面。
 
 ### 3.4 持久化目录布局
 
@@ -602,7 +609,38 @@ anaxa_engine_collections 1
 }
 ```
 
-### 6.8 手动触发 Compaction
+### 6.8 手动触发 Flush
+
+**POST** `/collections/{name}/flush`
+
+该接口不需要请求体，用于把当前活动 MemTable 立即冻结、落盘，并等待 Flush 完成；如果当前没有待刷新的 live/tombstone 数据，则该操作为 no-op。
+
+行为说明：
+
+- 适合批量导入结束后的“准备读”阶段
+- Flush 完成后会同步预热新 Segment 的 source index cache，避免首次检索再支付一次冷启动建索引代价
+- 如果当前已经有后台 Flush 在执行，请求会等待其结束后再返回
+
+成功响应：`200 OK`
+
+响应内容为 Flush 完成后的集合统计：
+
+```json
+{
+  "name": "docs",
+  "dimension": 3,
+  "metric": "COSINE",
+  "liveVectorCount": 1,
+  "tombstoneCount": 0,
+  "segmentCount": 1,
+  "flushInProgress": false,
+  "compactionInProgress": false,
+  "tenantId": "default",
+  "storageBytes": 12288
+}
+```
+
+### 6.9 手动触发 Compaction
 
 **POST** `/collections/{name}/compact`
 
@@ -960,34 +998,41 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/deletions" \
   }'
 ```
 
-### 8.6 手动触发 Compaction
+### 8.6 手动触发 Flush
+
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/flush" \
+  -H "X-API-Key: admin-secret"
+```
+
+### 8.7 手动触发 Compaction
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/collections/docs/compact" \
-  -H "X-API-Key: prod-secret-1"
+  -H "X-API-Key: admin-secret"
 ```
 
-### 8.7 查询健康状态
+### 8.8 查询健康状态
 
 ```bash
 curl "http://127.0.0.1:8080/health"
 ```
 
-### 8.8 查询集合统计
+### 8.9 查询集合统计
 
 ```bash
 curl "http://127.0.0.1:8080/collections/docs" \
   -H "X-API-Key: prod-secret-1"
 ```
 
-### 8.9 查询 Prometheus 指标
+### 8.10 查询 Prometheus 指标
 
 ```bash
 curl "http://127.0.0.1:8080/metrics" \
   -H "X-API-Key: admin-secret"
 ```
 
-### 8.10 执行备份
+### 8.11 执行备份
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/collections/docs/backup" \
@@ -998,7 +1043,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/backup" \
   }'
 ```
 
-### 8.11 从备份恢复到新集合
+### 8.12 从备份恢复到新集合
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
@@ -1010,6 +1055,42 @@ curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
   }'
 ```
 
+### 8.13 使用仓库内压测脚本
+
+仓库提供了一个基于 Python 标准库的压测脚本：`scripts\anaxa_bench.py`
+
+示例：
+
+```bash
+python scripts\anaxa_bench.py ^
+  --base-url http://127.0.0.1:8080 ^
+  --api-key admin-secret ^
+  --tenant-id team-a ^
+  --collection bench-team-a ^
+  --dimension 128 ^
+  --vectors 50000 ^
+  --ingest-batch-size 250 ^
+  --warmup-requests 500 ^
+  --search-requests 5000 ^
+  --search-workers 16 ^
+  --top-k 10 ^
+  --group-count 32 ^
+  --flush-after-ingest ^
+  --compact-after-ingest ^
+  --use-filter
+```
+
+脚本会自动：
+
+1. 创建集合
+2. 批量写入测试向量
+3. 可选执行 `flush -> compact -> wait-for-quiescent` 准备阶段
+4. 执行 warmup 检索
+5. 并发执行测量检索
+6. 输出 ingest 吞吐、prepare 用时、attempt QPS / successful QPS、状态码分布、p50/p95/p99/max 延迟，以及最终 collection 统计
+
+对于 Markdown 知识库这类“批量导入后快速切到读流量”的场景，推荐至少使用 `--flush-after-ingest`。它会把活动 MemTable 落盘并预热新 Segment，通常就足以消掉首次检索冷启动尖峰；`--compact-after-ingest` 更适合作为离线维护步骤，而不是首批查询前的阻塞准备动作。
+
 ## 9. 当前实现与架构愿景的差距
 
 当前版本已经把独立式进程、堆外向量存储、虚拟线程、结构化并发、SIMD 计算这些关键骨架搭起来了，但离完整的高性能向量数据库还有差距。
@@ -1019,10 +1100,14 @@ curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
 - 独立式 HTTP 服务
 - 基于 FFM 的堆外向量内存
 - 基于 mmap 的 Segment 读取
+- 写入接口的流式 JSON 反序列化
+- 更低拷贝的 WAL 记录编码
 - 基于 Vector API 的 SIMD 打分
 - 基于 Structured Concurrency 的并发检索
 - 基于 Virtual Threads 的高并发请求模型
 - HNSW + PQ 近似搜索
+- Segment prefetch
+- 自适应 `efSearch` / rerank 窗口调优
 - 持久化 HNSW / PQ / Payload 索引 sidecar
 - 增强型 Payload 过滤表达式 + 列式范围候选裁剪
 - 多租户 namespace、tenant 配额、tenant 级限流
@@ -1035,10 +1120,10 @@ curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
 
 1. **更激进的性能优化**  
    还可以继续做：
-   - 批量写入零拷贝解析
-   - Segment 级缓存与预取
+   - Binary / NDJSON bulk ingest 协议
+   - 常驻 segment cache 与异步预取队列
    - 更细粒度的并发调度
-   - 自适应 `efSearch` / rerank 窗口调优
+   - 自适应 compaction / flush policy
 
 2. **分布式能力**  
    当前是单机架构，没有副本、分片、Raft、一致性协议和跨节点 scatter-gather。
@@ -1053,7 +1138,7 @@ curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
 
 如果要继续把当前实现推进到更接近生产可用，建议按下面顺序演进：
 
-1. 继续推进 **零拷贝写入、Segment 预取和更自适应的 ANN 参数调优**
-2. 再补 **Snapshot 调度、冷热分层和更完整的后台数据生命周期管理**
+1. 先补 **Snapshot 调度、冷热分层和更完整的后台数据生命周期管理**
+2. 再做 **Binary / NDJSON bulk ingest、常驻 segment cache 与异步预取队列**
 3. 然后演进 **分布式、副本与一致性能力**
 4. 最后评估 **Valhalla 值类** 对候选节点与 Top-K 结构的替换收益

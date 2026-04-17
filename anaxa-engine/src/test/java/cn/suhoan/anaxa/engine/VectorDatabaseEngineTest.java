@@ -244,6 +244,39 @@ class VectorDatabaseEngineTest {
     }
 
     @Test
+    void flushesActiveMemtableOnDemand() throws Exception {
+        Path dataDir = tempDir.resolve("manual-flush");
+        try (VectorDatabaseEngine engine = new VectorDatabaseEngine(dataDir, 1_000_000L)) {
+            engine.createCollection(new CreateCollectionRequest("docs", 3, MetricType.COSINE, 1_000_000L));
+            engine.upsert("docs", new UpsertVectorsRequest(List.of(
+                    new UpsertVector("alpha", new float[]{1.0F, 0.0F, 0.0F}, Map.of("tenant", "blue"))
+            )));
+
+            assertEquals(0, engine.stats("docs").segmentCount());
+
+            engine.flush("docs");
+
+            CollectionStats stats = engine.stats("docs");
+            assertEquals(1, stats.segmentCount());
+            assertFalse(stats.flushInProgress());
+            assertEquals(List.of("alpha"), engine.search("docs", new SearchRequest(
+                    new float[]{1.0F, 0.0F, 0.0F},
+                    10,
+                    Map.of()
+            )).hits().stream().map(hit -> hit.id()).toList());
+        }
+
+        try (VectorDatabaseEngine reopened = new VectorDatabaseEngine(dataDir, 1_000_000L)) {
+            assertEquals(1, reopened.stats("docs").segmentCount());
+            assertEquals(List.of("alpha"), reopened.search("docs", new SearchRequest(
+                    new float[]{1.0F, 0.0F, 0.0F},
+                    10,
+                    Map.of()
+            )).hits().stream().map(hit -> hit.id()).toList());
+        }
+    }
+
+    @Test
     void searchesLargeCollectionThroughGraphIndex() throws Exception {
         try (VectorDatabaseEngine engine = new VectorDatabaseEngine(tempDir.resolve("graph-index"), 1_000_000L)) {
             engine.createCollection(new CreateCollectionRequest("docs", 16, MetricType.COSINE, 1_000_000L));

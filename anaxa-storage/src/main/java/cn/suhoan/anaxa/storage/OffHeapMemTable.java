@@ -3,6 +3,7 @@ package cn.suhoan.anaxa.storage;
 import cn.suhoan.anaxa.common.model.CollectionDefinition;
 import cn.suhoan.anaxa.common.model.MetricType;
 import cn.suhoan.anaxa.common.util.Copying;
+import cn.suhoan.anaxa.common.json.JsonSupport;
 import cn.suhoan.anaxa.index.SearchableVectors;
 import cn.suhoan.anaxa.index.VectorEntryConsumer;
 import cn.suhoan.anaxa.index.VectorMetricScorer;
@@ -92,6 +93,7 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
         searchStateVersion.incrementAndGet();
     }
 
+    @Override
     public long approximateBytes() {
         return approximateBytes.sum();
     }
@@ -154,7 +156,7 @@ public final class OffHeapMemTable implements SearchableVectors, AutoCloseable {
     }
 
     private int estimateFootprint(String id, Map<String, Object> payload, int dimension) {
-        int payloadBytes = cn.suhoan.anaxa.common.json.JsonSupport.writeBytes(payload).length;
+        int payloadBytes = JsonSupport.estimateBytes(payload);
         return id.getBytes(StandardCharsets.UTF_8).length + payloadBytes + (dimension * Float.BYTES) + Integer.BYTES;
     }
 }

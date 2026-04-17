@@ -46,6 +46,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.StructuredTaskScope;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -66,8 +67,10 @@ final class EngineCollection implements AutoCloseable {
     private final AtomicBoolean flushInProgress;
     private final AtomicBoolean compactionInProgress;
     private final AtomicBoolean closed;
+    private final AtomicInteger activeSearches;
     private final ExecutorService flushExecutor;
     private final QueryCache queryCache;
+    private final Object searchLifecycleMonitor;
 
     private volatile OffHeapMemTable activeMemTable;
     private volatile WalAppender activeWal;
@@ -96,8 +99,10 @@ final class EngineCollection implements AutoCloseable {
         this.flushInProgress = new AtomicBoolean(false);
         this.compactionInProgress = new AtomicBoolean(false);
         this.closed = new AtomicBoolean(false);
+        this.activeSearches = new AtomicInteger(0);
         this.flushExecutor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("anaxa-flush-", 0).factory());
         this.queryCache = new QueryCache(128);
+        this.searchLifecycleMonitor = new Object();
     }
 
     static EngineCollection createNew(
@@ -353,6 +358,12 @@ final class EngineCollection implements AutoCloseable {
         }
     }
 
+    void flush() {
+        ensureHealthy();
+        scheduleFlush(true);
+        awaitPendingFlushes();
+    }
+
     SearchResponse search(SearchRequest request) {
         ensureHealthy();
         if (request.vector().length != definition.dimension()) {
@@ -361,104 +372,109 @@ final class EngineCollection implements AutoCloseable {
             );
         }
 
-        long startedAtNanos = System.nanoTime();
-        SearchResponse cached = queryCache.get(request);
-        if (cached != null) {
-            observer.onSearchCompleted(new CollectionSearchMetrics(
-                    definition.tenantId(),
-                    definition.name(),
-                    0,
-                    0,
-                    0,
-                    0L,
-                    0L,
-                    0L,
-                    0L,
-                    0L,
-                    0L,
-                    0L,
-                    true,
-                    cached.hits().size(),
-                    System.nanoTime() - startedAtNanos
-            ));
-            return cached;
-        }
-
-        List<SearchableVectors> sources = new ArrayList<>(1 + pendingFlushMemTables.size() + segments.size());
-        stateLock.readLock().lock();
+        beginSearch();
         try {
-            sources.add(activeMemTable);
-            sources.addAll(pendingFlushMemTables);
-            sources.addAll(segments);
+            long startedAtNanos = System.nanoTime();
+            SearchResponse cached = queryCache.get(request);
+            if (cached != null) {
+                observer.onSearchCompleted(new CollectionSearchMetrics(
+                        definition.tenantId(),
+                        definition.name(),
+                        0,
+                        0,
+                        0,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        true,
+                        cached.hits().size(),
+                        System.nanoTime() - startedAtNanos
+                ));
+                return cached;
+            }
+
+            List<SearchableVectors> sources = new ArrayList<>(1 + pendingFlushMemTables.size() + segments.size());
+            stateLock.readLock().lock();
+            try {
+                sources.add(activeMemTable);
+                sources.addAll(pendingFlushMemTables);
+                sources.addAll(segments);
+            } finally {
+                stateLock.readLock().unlock();
+            }
+
+            try (StructuredTaskScope<SourceSearchResult, List<SourceSearchResult>> scope = StructuredTaskScope.open(
+                    StructuredTaskScope.Joiner.<SourceSearchResult>allSuccessfulOrThrow())) {
+                for (SearchableVectors source : sources) {
+                    if (source.size() > 0) {
+                        scope.fork(() -> searcher.search(source, request, this::isLiveEntry));
+                    }
+                }
+
+                List<SourceSearchResult> partialResults = scope.join();
+                TopKAccumulator accumulator = new TopKAccumulator(request.topK());
+                int exactSourceCount = 0;
+                int approximateSourceCount = 0;
+                long filterCandidateCount = 0L;
+                long approximateCandidateCount = 0L;
+                long rerankedCandidateCount = 0L;
+                long scoredCandidateCount = 0L;
+                long graphVisitedCount = 0L;
+                long sourceIndexCacheHitCount = 0L;
+                long sourceIndexCacheMissCount = 0L;
+
+                for (SourceSearchResult partialResult : partialResults) {
+                    partialResult.hits().forEach(accumulator::offer);
+                    if (partialResult.metrics().mode() == SearchMode.EXACT) {
+                        exactSourceCount++;
+                    } else {
+                        approximateSourceCount++;
+                    }
+                    filterCandidateCount += partialResult.metrics().filterCandidateCount();
+                    approximateCandidateCount += partialResult.metrics().approximateCandidateCount();
+                    rerankedCandidateCount += partialResult.metrics().rerankedCandidateCount();
+                    scoredCandidateCount += partialResult.metrics().scoredCandidateCount();
+                    graphVisitedCount += partialResult.metrics().graphVisitedCount();
+                    if (partialResult.metrics().indexCacheHit()) {
+                        sourceIndexCacheHitCount++;
+                    } else {
+                        sourceIndexCacheMissCount++;
+                    }
+                }
+                SearchResponse response = new SearchResponse(accumulator.toSortedList());
+                queryCache.put(request, response);
+                observer.onSearchCompleted(new CollectionSearchMetrics(
+                        definition.tenantId(),
+                        definition.name(),
+                        partialResults.size(),
+                        exactSourceCount,
+                        approximateSourceCount,
+                        filterCandidateCount,
+                        approximateCandidateCount,
+                        rerankedCandidateCount,
+                        scoredCandidateCount,
+                        graphVisitedCount,
+                        sourceIndexCacheHitCount,
+                        sourceIndexCacheMissCount,
+                        false,
+                        response.hits().size(),
+                        System.nanoTime() - startedAtNanos
+                ));
+                return response;
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Search interrupted for collection " + definition.name(), exception);
+            } catch (RuntimeException exception) {
+                throw exception;
+            } catch (Throwable throwable) {
+                throw new RuntimeException("Search failed for collection " + definition.name(), throwable);
+            }
         } finally {
-            stateLock.readLock().unlock();
-        }
-
-        try (StructuredTaskScope<SourceSearchResult, List<SourceSearchResult>> scope = StructuredTaskScope.open(
-                StructuredTaskScope.Joiner.<SourceSearchResult>allSuccessfulOrThrow())) {
-            for (SearchableVectors source : sources) {
-                if (source.size() > 0) {
-                    scope.fork(() -> searcher.search(source, request, this::isLiveEntry));
-                }
-            }
-
-            List<SourceSearchResult> partialResults = scope.join();
-            TopKAccumulator accumulator = new TopKAccumulator(request.topK());
-            int exactSourceCount = 0;
-            int approximateSourceCount = 0;
-            long filterCandidateCount = 0L;
-            long approximateCandidateCount = 0L;
-            long rerankedCandidateCount = 0L;
-            long scoredCandidateCount = 0L;
-            long graphVisitedCount = 0L;
-            long sourceIndexCacheHitCount = 0L;
-            long sourceIndexCacheMissCount = 0L;
-
-            for (SourceSearchResult partialResult : partialResults) {
-                partialResult.hits().forEach(accumulator::offer);
-                if (partialResult.metrics().mode() == SearchMode.EXACT) {
-                    exactSourceCount++;
-                } else {
-                    approximateSourceCount++;
-                }
-                filterCandidateCount += partialResult.metrics().filterCandidateCount();
-                approximateCandidateCount += partialResult.metrics().approximateCandidateCount();
-                rerankedCandidateCount += partialResult.metrics().rerankedCandidateCount();
-                scoredCandidateCount += partialResult.metrics().scoredCandidateCount();
-                graphVisitedCount += partialResult.metrics().graphVisitedCount();
-                if (partialResult.metrics().indexCacheHit()) {
-                    sourceIndexCacheHitCount++;
-                } else {
-                    sourceIndexCacheMissCount++;
-                }
-            }
-            SearchResponse response = new SearchResponse(accumulator.toSortedList());
-            queryCache.put(request, response);
-            observer.onSearchCompleted(new CollectionSearchMetrics(
-                    definition.tenantId(),
-                    definition.name(),
-                    partialResults.size(),
-                    exactSourceCount,
-                    approximateSourceCount,
-                    filterCandidateCount,
-                    approximateCandidateCount,
-                    rerankedCandidateCount,
-                    scoredCandidateCount,
-                    graphVisitedCount,
-                    sourceIndexCacheHitCount,
-                    sourceIndexCacheMissCount,
-                    false,
-                    response.hits().size(),
-                    System.nanoTime() - startedAtNanos
-            ));
-            return response;
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Search interrupted for collection " + definition.name(), exception);
-        } catch (RuntimeException exception) {
-            throw exception;
-        } catch (Throwable throwable) {
-            throw new RuntimeException("Search failed for collection " + definition.name(), throwable);
+            endSearch();
         }
     }
 
@@ -528,10 +544,11 @@ final class EngineCollection implements AutoCloseable {
             Thread.currentThread().interrupt();
             flushExecutor.shutdownNow();
             if (failure == null) {
-            failure = new RuntimeException("Interrupted while closing collection " + definition.name(), exception);
+                failure = new RuntimeException("Interrupted while closing collection " + definition.name(), exception);
             }
         }
 
+        awaitActiveSearches();
         failure = closeQuietly(activeMemTable, failure);
         for (OffHeapMemTable memTable : pendingFlushMemTables) {
             failure = closeQuietly(memTable, failure);
@@ -546,7 +563,14 @@ final class EngineCollection implements AutoCloseable {
     }
 
     private void maybeScheduleFlush() {
-        if (backgroundFailure != null || activeMemTable.approximateBytes() < definition.flushThresholdBytes()) {
+        scheduleFlush(false);
+    }
+
+    private void scheduleFlush(boolean force) {
+        if (backgroundFailure != null) {
+            return;
+        }
+        if (!force && activeMemTable.approximateBytes() < definition.flushThresholdBytes()) {
             return;
         }
         if (!flushInProgress.compareAndSet(false, true)) {
@@ -557,7 +581,9 @@ final class EngineCollection implements AutoCloseable {
         Path frozenWalPath;
         stateLock.writeLock().lock();
         try {
-            if (backgroundFailure != null || activeMemTable.approximateBytes() < definition.flushThresholdBytes()) {
+            if (backgroundFailure != null
+                    || (!force && activeMemTable.approximateBytes() < definition.flushThresholdBytes())
+                    || (force && activeMemTable.size() == 0)) {
                 flushInProgress.set(false);
                 return;
             }
@@ -588,9 +614,18 @@ final class EngineCollection implements AutoCloseable {
         try {
             ImmutableSegment segment = SegmentWriter.write(paths, definition, frozenMemTable);
             if (segment != null) {
-                segments.add(segment);
+                searcher.warm(segment);
             }
-            pendingFlushMemTables.remove(frozenMemTable);
+            stateLock.writeLock().lock();
+            try {
+                if (segment != null) {
+                    segments.add(segment);
+                }
+                pendingFlushMemTables.remove(frozenMemTable);
+            } finally {
+                stateLock.writeLock().unlock();
+            }
+            awaitActiveSearches();
             Files.deleteIfExists(frozenWalPath);
             searcher.evict(frozenMemTable.sourceId());
             frozenMemTable.close();
@@ -677,6 +712,9 @@ final class EngineCollection implements AutoCloseable {
         ImmutableSegment compactedSegment = compactedEntries.isEmpty()
                 ? null
                 : SegmentWriter.write(paths, definition, generationCounter.incrementAndGet(), compactedEntries);
+        if (compactedSegment != null) {
+            searcher.warm(compactedSegment);
+        }
 
         stateLock.writeLock().lock();
         try {
@@ -689,6 +727,7 @@ final class EngineCollection implements AutoCloseable {
             stateLock.writeLock().unlock();
         }
 
+        awaitActiveSearches();
         RuntimeException cleanupFailure = null;
         for (ImmutableSegment candidate : candidates) {
             cleanupFailure = deleteCompactedSegment(candidate, cleanupFailure);
@@ -773,6 +812,18 @@ final class EngineCollection implements AutoCloseable {
         }
     }
 
+    private void beginSearch() {
+        activeSearches.incrementAndGet();
+    }
+
+    private void endSearch() {
+        if (activeSearches.decrementAndGet() == 0) {
+            synchronized (searchLifecycleMonitor) {
+                searchLifecycleMonitor.notifyAll();
+            }
+        }
+    }
+
     private void rewriteActiveWalSnapshot() throws IOException {
         Path temporaryWal = paths.activeWal().resolveSibling("active-recovered.wal");
         Files.deleteIfExists(temporaryWal);
@@ -785,6 +836,35 @@ final class EngineCollection implements AutoCloseable {
         }
 
         moveIntoPlace(temporaryWal, paths.activeWal());
+    }
+
+    private void awaitActiveSearches() {
+        while (activeSearches.get() > 0) {
+            try {
+                synchronized (searchLifecycleMonitor) {
+                    if (activeSearches.get() == 0) {
+                        return;
+                    }
+                    searchLifecycleMonitor.wait(10L);
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for searches on collection " + definition.name(), exception);
+            }
+        }
+    }
+
+    private void awaitPendingFlushes() {
+        while (flushInProgress.get() || !pendingFlushMemTables.isEmpty()) {
+            ensureHealthy();
+            try {
+                Thread.sleep(10L);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while flushing collection " + definition.name(), exception);
+            }
+        }
+        ensureHealthy();
     }
 
     private static EntryState newerState(EntryState left, EntryState right) {
@@ -878,7 +958,7 @@ final class EngineCollection implements AutoCloseable {
     }
 
     private static int estimateFootprint(String id, Map<String, Object> payload, int dimension) {
-        int payloadBytes = JsonSupport.writeBytes(payload).length;
+        int payloadBytes = JsonSupport.estimateBytes(payload);
         return id.getBytes(StandardCharsets.UTF_8).length + payloadBytes + (dimension * Float.BYTES) + Integer.BYTES;
     }
 

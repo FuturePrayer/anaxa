@@ -74,6 +74,53 @@ class AnaxaHttpServerTest {
     }
 
     @Test
+    void servesManualFlushEndpoint() throws Exception {
+        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-flush"), 1_000_000L))) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.port();
+
+            assertEquals(201, sendJson(
+                    client,
+                    baseUrl + "/collections",
+                    "POST",
+                    Map.of("name", "docs", "dimension", 3, "metric", "COSINE", "flushThresholdBytes", 1_000_000)
+            ).statusCode());
+
+            assertEquals(200, sendJson(
+                    client,
+                    baseUrl + "/collections/docs/vectors",
+                    "POST",
+                    Map.of("vectors", List.of(
+                            Map.of("id", "alpha", "vector", List.of(1.0F, 0.0F, 0.0F), "payload", Map.of("tenant", "blue"))
+                    ))
+            ).statusCode());
+
+            CollectionStats beforeFlush = collectionStats(client, baseUrl, "docs", null, null);
+            assertEquals(0, beforeFlush.segmentCount());
+
+            HttpResponse<String> flush = sendJson(
+                    client,
+                    baseUrl + "/collections/docs/flush",
+                    "POST",
+                    Map.of()
+            );
+            assertEquals(200, flush.statusCode());
+            CollectionStats flushed = JsonSupport.mapper().readValue(flush.body(), CollectionStats.class);
+            assertEquals(1, flushed.segmentCount());
+            assertFalse(flushed.flushInProgress());
+
+            SearchResponse response = JsonSupport.mapper().readValue(sendJson(
+                    client,
+                    baseUrl + "/collections/docs/search",
+                    "POST",
+                    Map.of("vector", List.of(1.0F, 0.0F, 0.0F), "topK", 10, "filter", Map.of())
+            ).body(), SearchResponse.class);
+            assertEquals(List.of("alpha"), response.hits().stream().map(hit -> hit.id()).toList());
+        }
+    }
+
+    @Test
     void servesDeleteAndCompactionEndpoints() throws Exception {
         try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-delete"), 1L))) {
             server.start();
@@ -553,6 +600,24 @@ class AnaxaHttpServerTest {
                     "writer-key"
             );
             assertEquals(200, upsert.statusCode());
+
+            HttpResponse<String> forbiddenFlush = sendJson(
+                    client,
+                    baseUrl + "/collections/docs/flush",
+                    "POST",
+                    Map.of(),
+                    "writer-key"
+            );
+            assertEquals(403, forbiddenFlush.statusCode());
+
+            HttpResponse<String> adminFlush = sendJson(
+                    client,
+                    baseUrl + "/collections/docs/flush",
+                    "POST",
+                    Map.of(),
+                    "admin-key"
+            );
+            assertEquals(200, adminFlush.statusCode());
 
             HttpResponse<String> search = sendJson(
                     client,

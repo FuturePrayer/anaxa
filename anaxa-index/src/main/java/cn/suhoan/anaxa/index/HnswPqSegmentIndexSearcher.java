@@ -32,15 +32,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
 
 public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
-    private static final int EXACT_SCAN_THRESHOLD = 256;
-    private static final int FILTER_EXACT_SCAN_THRESHOLD = 512;
-    private static final int EF_SEARCH = 96;
+    private static final int EXACT_SCAN_THRESHOLD_BASE = 256;
+    private static final int FILTER_EXACT_SCAN_THRESHOLD_BASE = 512;
+    private static final int EF_SEARCH_BASE = 64;
+    private static final int EF_SEARCH_CEILING = 768;
+    private static final int RERANK_WINDOW_FLOOR = 24;
+    private static final int RERANK_WINDOW_CEILING = 384;
     private static final int MAX_SUBSPACES = 4;
     private static final int MAX_CENTROIDS = 16;
     private static final int HNSW_MAX_LEVEL = 8;
     private static final int HNSW_M = 8;
     private static final int HNSW_M0 = 16;
     private static final int HNSW_EF_CONSTRUCTION = 64;
+    private static final double EXACT_SCAN_FILTER_RATIO = 0.12D;
+    private static final long BUILD_PREFETCH_BUDGET_BYTES = 64L * 1024L * 1024L;
+    private static final long QUERY_PREFETCH_FLOOR_BYTES = 8L * 1024L * 1024L;
+    private static final long QUERY_PREFETCH_CEILING_BYTES = 64L * 1024L * 1024L;
+    private static final long APPROXIMATE_PREFETCH_CEILING_BYTES = 32L * 1024L * 1024L;
     private static final int ARTIFACT_MAGIC = 0x414E4E31;
     private static final int ARTIFACT_VERSION = 2;
     private static final int ARTIFACT_FLAG_QUANTIZER = 1;
@@ -61,7 +69,16 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                         ? markCacheHit(current, indexCacheHit)
                         : CachedSourceIndex.build(source)
         );
-        return index.search(request, isLiveEntry, indexCacheHit.get());
+        return index.search(source, request, isLiveEntry, indexCacheHit.get());
+    }
+
+    @Override
+    public void warm(SearchableVectors source) {
+        cache.compute(source.sourceId(), (sourceId, current) ->
+                current != null && current.version() == source.searchStateVersion()
+                        ? current
+                        : CachedSourceIndex.build(source)
+        );
     }
 
     @Override
@@ -90,6 +107,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             HnswGraph graph
     ) {
         private static CachedSourceIndex build(SearchableVectors source) {
+            source.prefetch(BUILD_PREFETCH_BUDGET_BYTES);
             ArrayList<IndexedVectorRef> vectors = new ArrayList<>(source.size());
             ArrayList<Map<String, Object>> payloads = new ArrayList<>(source.size());
 
@@ -118,10 +136,10 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
 
             PayloadFilterIndex payloadIndex = PayloadFilterIndex.build(payloads);
             PayloadColumnStore payloadColumnStore = PayloadColumnStore.build(payloads);
-            ProductQuantizer quantizer = denseVectors.size() <= EXACT_SCAN_THRESHOLD
+            ProductQuantizer quantizer = denseVectors.size() <= EXACT_SCAN_THRESHOLD_BASE
                     ? null
                     : ProductQuantizer.train(denseVectors, source.dimension());
-            HnswGraph graph = denseVectors.size() <= EXACT_SCAN_THRESHOLD
+            HnswGraph graph = denseVectors.size() <= EXACT_SCAN_THRESHOLD_BASE
                     ? null
                     : HnswGraph.build(denseVectors, source.metric());
 
@@ -239,7 +257,12 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             }
         }
 
-        private SourceSearchResult search(SearchRequest request, BiPredicate<String, Long> isLiveEntry, boolean indexCacheHit) {
+        private SourceSearchResult search(
+                SearchableVectors source,
+                SearchRequest request,
+                BiPredicate<String, Long> isLiveEntry,
+                boolean indexCacheHit
+        ) {
             if (vectors.isEmpty()) {
                 return new SourceSearchResult(
                         List.of(),
@@ -259,10 +282,16 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                 );
             }
 
-            if (graph == null
-                    || quantizer == null
-                    || vectors.size() <= EXACT_SCAN_THRESHOLD
-                    || (filtered != null && filtered.cardinality() <= FILTER_EXACT_SCAN_THRESHOLD)) {
+            AnnSearchPlan searchPlan = AnnSearchPlan.plan(
+                    vectors.size(),
+                    filterCandidateCount,
+                    request.topK(),
+                    dimension,
+                    graph != null && quantizer != null
+            );
+            source.prefetch(searchPlan.prefetchBudgetBytes());
+
+            if (searchPlan.exact()) {
                 ExactScanResult exact = exactScan(request, isLiveEntry, filterPlan, filtered, queryNorm);
                 return new SourceSearchResult(
                         exact.hits(),
@@ -280,7 +309,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             }
 
             QueryLookup lookup = quantizer.lookup(query, metric, queryNorm);
-            GraphSearchResult graphSearchResult = graph.search(lookup, filtered, Math.max(EF_SEARCH, request.topK() * 8));
+            GraphSearchResult graphSearchResult = graph.search(lookup, filtered, searchPlan.efSearch());
             if (graphSearchResult.ordinals().isEmpty()) {
                 return new SourceSearchResult(
                         List.of(),
@@ -298,7 +327,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             }
 
             TopKAccumulator accumulator = new TopKAccumulator(request.topK());
-            int rerankLimit = Math.min(graphSearchResult.ordinals().size(), Math.max(request.topK() * 4, 32));
+            int rerankLimit = Math.min(graphSearchResult.ordinals().size(), searchPlan.rerankLimit());
             int scoredCandidateCount = 0;
             for (int index = 0; index < rerankLimit; index++) {
                 int ordinal = graphSearchResult.ordinals().get(index);
@@ -387,6 +416,57 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
     private record ExactScanResult(List<SearchHit> hits, int scoredCandidateCount) {
     }
 
+    private record AnnSearchPlan(boolean exact, int efSearch, int rerankLimit, long prefetchBudgetBytes) {
+        private static AnnSearchPlan plan(
+                int vectorCount,
+                int filterCandidateCount,
+                int topK,
+                int dimension,
+                boolean annAvailable
+        ) {
+            int safeTopK = Math.max(1, topK);
+            int effectiveCandidates = Math.max(filterCandidateCount, safeTopK);
+            int exactThreshold = Math.max(EXACT_SCAN_THRESHOLD_BASE, safeTopK * 32);
+            int filteredExactThreshold = Math.max(FILTER_EXACT_SCAN_THRESHOLD_BASE, safeTopK * 40);
+            double filterRatio = vectorCount == 0 ? 0D : effectiveCandidates / (double) vectorCount;
+
+            boolean exact = !annAvailable
+                    || vectorCount <= exactThreshold
+                    || effectiveCandidates <= filteredExactThreshold
+                    || filterRatio <= EXACT_SCAN_FILTER_RATIO;
+
+            int adaptiveEf = Math.max(EF_SEARCH_BASE, safeTopK * 6);
+            adaptiveEf += log2ceil(Math.max(1, vectorCount)) * 8;
+            if (filterCandidateCount > 0 && filterCandidateCount < vectorCount) {
+                adaptiveEf = Math.min(adaptiveEf, Math.max(safeTopK * 4, filterCandidateCount));
+            }
+            adaptiveEf = Math.max(safeTopK * 4, adaptiveEf);
+            adaptiveEf = Math.min(EF_SEARCH_CEILING, adaptiveEf);
+
+            int candidatePressure = Math.max(1, effectiveCandidates / safeTopK);
+            int rerankMultiplier = Math.min(8, 2 + log2ceil(candidatePressure));
+            int rerankLimit = Math.max(RERANK_WINDOW_FLOOR, safeTopK * rerankMultiplier);
+            if (filterRatio <= 0.35D) {
+                rerankLimit += safeTopK * 2;
+            }
+            rerankLimit = Math.max(safeTopK, Math.min(RERANK_WINDOW_CEILING, rerankLimit));
+
+            long approximatePrefetch = Math.min(
+                    APPROXIMATE_PREFETCH_CEILING_BYTES,
+                    Math.max(
+                            QUERY_PREFETCH_FLOOR_BYTES,
+                            (long) safeTopK * Math.max(1, dimension) * Float.BYTES * 128L
+                    )
+            );
+            return new AnnSearchPlan(
+                    exact,
+                    adaptiveEf,
+                    rerankLimit,
+                    exact ? QUERY_PREFETCH_CEILING_BYTES : approximatePrefetch
+            );
+        }
+    }
+
     private record IndexedVectorRef(
             String id,
             long sequence,
@@ -395,6 +475,13 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             long vectorOffsetBytes,
             Map<String, Object> payload
     ) {
+    }
+
+    private static int log2ceil(int value) {
+        if (value <= 1) {
+            return 0;
+        }
+        return Integer.SIZE - Integer.numberOfLeadingZeros(value - 1);
     }
 
     private record QueryLookup(

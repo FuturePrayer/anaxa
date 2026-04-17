@@ -101,7 +101,9 @@ public final class WalAppender implements AutoCloseable {
                 + vectorBytes
                 + payloadBytes.length;
 
-        ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES + bodyLength);
+        ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES + bodyLength + Integer.BYTES);
+        buffer.putInt(bodyLength);
+        int bodyStart = buffer.position();
         buffer.putInt(record.tombstone() ? FLAG_TOMBSTONE : 0);
         buffer.putLong(record.sequence());
         buffer.putInt(idBytes.length);
@@ -113,18 +115,10 @@ public final class WalAppender implements AutoCloseable {
             }
         }
         buffer.put(payloadBytes);
+        int checksum = checksum(buffer.array(), bodyStart, bodyLength);
+        buffer.putInt(checksum);
         buffer.flip();
-
-        byte[] body = new byte[bodyLength];
-        buffer.get(body);
-        int checksum = checksum(body);
-
-        ByteBuffer recordBuffer = ByteBuffer.allocate(Integer.BYTES + bodyLength + Integer.BYTES);
-        recordBuffer.putInt(bodyLength);
-        recordBuffer.put(body);
-        recordBuffer.putInt(checksum);
-        recordBuffer.flip();
-        writeFully(recordBuffer);
+        writeFully(buffer);
     }
 
     private void writeFully(ByteBuffer buffer) throws IOException {
@@ -136,6 +130,12 @@ public final class WalAppender implements AutoCloseable {
     static int checksum(byte[] body) {
         CRC32 crc32 = new CRC32();
         crc32.update(body);
+        return (int) crc32.getValue();
+    }
+
+    static int checksum(byte[] body, int offset, int length) {
+        CRC32 crc32 = new CRC32();
+        crc32.update(body, offset, length);
         return (int) crc32.getValue();
     }
 }
