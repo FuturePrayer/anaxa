@@ -1091,6 +1091,49 @@ python scripts\anaxa_bench.py ^
 
 对于 Markdown 知识库这类“批量导入后快速切到读流量”的场景，推荐至少使用 `--flush-after-ingest`。它会把活动 MemTable 落盘并预热新 Segment，通常就足以消掉首次检索冷启动尖峰；`--compact-after-ingest` 更适合作为离线维护步骤，而不是首批查询前的阻塞准备动作。
 
+### 8.14 使用 Java benchmark 模块
+
+仓库现在还提供了一个独立的 Java benchmark 模块：`anaxa-benchmark`。它默认会在本机当前运行环境内自举一个临时 AnaxaDB 实例，按预置 profile 跑多组参数场景，并把评测报告直接输出到 stdout。
+
+构建：
+
+```bash
+mvn -pl anaxa-benchmark -am -DskipTests package
+```
+
+运行内嵌 benchmark（默认 profile 为 `standard`）：
+
+```bash
+java --enable-preview --add-modules jdk.incubator.vector ^
+  -jar anaxa-benchmark\target\anaxa-benchmark-1.0-SNAPSHOT.jar ^
+  --profile=markdown-kb ^
+  --data-dir=D:\anaxa-data\bench-suite
+```
+
+如果要压测一个已经在运行的服务，也可以切到 remote 模式：
+
+```bash
+java --enable-preview --add-modules jdk.incubator.vector ^
+  -jar anaxa-benchmark\target\anaxa-benchmark-1.0-SNAPSHOT.jar ^
+  --base-url=http://127.0.0.1:8080 ^
+  --tenant-id=team-a ^
+  --profile=standard
+```
+
+当前支持的 profile：
+
+- `quick`：快速给出一份轻量级环境指纹
+- `standard`：默认环境评估，覆盖小规模通用场景和中/大规模知识库场景
+- `markdown-kb`：专门对比 Markdown 知识库场景下 `none / flush / flush+compact`
+- `full`：增加更重参数档位，适合做更完整的机器摸底
+
+输出报告会包含：
+
+1. 环境信息（JDK / VM / OS / CPU / 堆大小 / base URL）
+2. 每个场景的 ingest、prepare、warmup、measured-search 指标
+3. 汇总表格
+4. 自动生成的 observations，用来帮助判断 flush / compaction / 维度变化对冷启动和稳态 QPS 的影响
+
 ## 9. 当前实现与架构愿景的差距
 
 当前版本已经把独立式进程、堆外向量存储、虚拟线程、结构化并发、SIMD 计算这些关键骨架搭起来了，但离完整的高性能向量数据库还有差距。

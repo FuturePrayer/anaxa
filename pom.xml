@@ -16,6 +16,7 @@
         <module>anaxa-storage</module>
         <module>anaxa-engine</module>
         <module>anaxa-server</module>
+        <module>anaxa-benchmark</module>
     </modules>
 
     <properties>
