@@ -49,7 +49,7 @@ mvn -pl anaxa-benchmark -am -DskipTests package
 ### 2.1 嵌入式 benchmark
 
 ```bash
-java --enable-preview --add-modules jdk.incubator.vector ^
+java --enable-preview ^
   -jar anaxa-benchmark\target\anaxa-benchmark-1.0-SNAPSHOT.jar ^
   --profile=markdown-kb ^
   --data-dir=D:\anaxa-data\bench-suite
@@ -58,7 +58,7 @@ java --enable-preview --add-modules jdk.incubator.vector ^
 ### 2.2 Remote benchmark
 
 ```bash
-java --enable-preview --add-modules jdk.incubator.vector ^
+java --enable-preview ^
   -jar anaxa-benchmark\target\anaxa-benchmark-1.0-SNAPSHOT.jar ^
   --base-url=http://127.0.0.1:8080 ^
   --tenant-id=team-a ^
@@ -72,6 +72,7 @@ java --enable-preview --add-modules jdk.incubator.vector ^
 | `quick` | 快速得到环境指纹 |
 | `standard` | 默认环境评估，覆盖通用场景和中/大规模知识库场景 |
 | `markdown-kb` | 专门比较知识库场景下 `none / flush / flush+compact` |
+| `scorer-eval` | 覆盖不同维度、topK、过滤选择性与 L2/COSINE 的 scorer 评估场景 |
 | `full` | 更完整的机器摸底 |
 
 ## 4. benchmark 场景组织方式

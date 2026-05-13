@@ -2,14 +2,14 @@
 
 ## 1. 当前实现与架构愿景的距离
 
-当前版本已经把独立式进程、堆外向量存储、虚拟线程、结构化并发、SIMD 计算、ANN sidecar、tenant 隔离、备份恢复和基准模块这些关键骨架搭起来了。对“单机部署的 Markdown / RAG 知识库后端”来说，核心能力已经成型；后续演进重点已经不再是“能不能用”，而是继续把 **单机生产化** 做得更稳、更省、更可观测。
+当前版本已经把独立式进程、堆外向量存储、虚拟线程、结构化并发、纯 Java 标量打分、ANN sidecar、tenant 隔离、备份恢复、WebUI 和基准模块这些关键骨架搭起来了。对“单机部署的 Markdown / RAG 知识库后端”来说，核心能力已经成型；后续演进重点已经不再是“能不能用”，而是继续把 **单机生产化** 做得更稳、更省、更可观测。
 
 ## 2. 已完成的关键目标
 
 - 独立式 HTTP 服务
 - 基于 FFM 的堆外向量内存
 - 基于 mmap 的 Segment 读取
-- 基于 Vector API 的 SIMD 打分
+- 纯 Java 标量向量打分（已移除 `jdk.incubator.vector` 运行依赖）
 - 基于 Virtual Threads 的并发请求模型
 - 基于 Structured Concurrency 的多 source 并发检索
 - HNSW + PQ 近似搜索
@@ -28,6 +28,7 @@
 - tenant 运维视图（tenant stats / backup inventory / tenant snapshot）
 - 二进制 bulk ingest 协议
 - 独立预取队列 + resident hot/cold cache 驱逐
+- 内置 WebUI 测试控制台（可通过启动参数关闭）
 
 ## 3. 仍值得继续补齐的单机能力
 
@@ -39,8 +40,21 @@
 - cache / warmup / prefetch 预算按负载自适应调参
 - 更激进的批量写入协议压缩与零拷贝路径
 - 更系统化的 benchmark profile 与容量规划建议
+- 可选 scorer provider：默认保留纯 Java scalar scorer，未来如 benchmark 证明需要更高吞吐，可增加 `scalar / jdk-vector / native` 可插拔打分后端；`jdk-vector` 或 native provider 应作为可选模块，避免主 server 重新依赖 incubator API 或 native 运行库
 
-### 3.2 更成熟的数据生命周期管理
+### 3.2 继续降低 preview / incubator 依赖
+
+当前已经移除 `jdk.incubator.vector` 依赖，但仍使用 JDK preview 能力：
+
+- `ScopedValue` 用于请求上下文传递
+- `StructuredTaskScope` 用于多 source 并发搜索
+
+后续如果目标是更保守的生产运行环境，建议继续评估：
+
+- 用显式参数或 `ThreadLocal` 替换 `ScopedValue`
+- 用 `ExecutorService` / `Future` / `CompletableFuture` 替换 `StructuredTaskScope`
+
+### 3.3 更成熟的数据生命周期管理
 
 自动 snapshot、保留策略和 tenant snapshot 已经补上，但还可以继续增强：
 
@@ -49,7 +63,7 @@
 - 更成熟的 compaction policy 调优
 - 更丰富的后台任务状态与告警视图
 
-### 3.3 更强的生产运维闭环
+### 3.4 更强的生产运维闭环
 
 对单机生产可用来说，后续重点会是运维细节，而不是基础功能本身：
 
@@ -62,9 +76,10 @@
 
 如果继续把当前实现向“更成熟的单机生产形态”推进，建议按下面顺序走：
 
-1. 继续补 **更细的 source/stage backpressure、cache 自适应调参、批量写入压缩**
-2. 再补 **更深的冷热分层、snapshot 完整性校验与 restore drill**
-3. 最后完善 **tenant 运维动作、SLO/告警、升级/恢复手册与故障演练**
+1. 先继续减少 **preview API 依赖**，评估替换 `ScopedValue` / `StructuredTaskScope`
+2. 再补 **更细的 source/stage backpressure、cache 自适应调参、批量写入压缩**
+3. 之后补 **更深的冷热分层、snapshot 完整性校验与 restore drill**
+4. 最后完善 **tenant 运维动作、SLO/告警、升级/恢复手册与故障演练**
 
 ## 5. 面向 Markdown 知识库的判断
 

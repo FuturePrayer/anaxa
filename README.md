@@ -26,7 +26,7 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已
 2. 启动服务
 
    ```powershell
-    java --enable-preview --add-modules jdk.incubator.vector `
+    java --enable-preview `
       -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
       --data-dir=D:\anaxa-data `
       --allow-open-access=true
@@ -60,6 +60,7 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已
 - HNSW+PQ 近似检索，支持 payload 倒排和列式范围过滤
 - collection query cache + source index cache + Segment prefetch / resident warmup
 - API Key / RBAC / tenant 配额 / rate limiting / audit / backup-restore
+- 内置 WebUI 测试控制台：`/ui`，可通过 `--web-ui-enabled=false` 关闭
 
 ## Maven 模块
 

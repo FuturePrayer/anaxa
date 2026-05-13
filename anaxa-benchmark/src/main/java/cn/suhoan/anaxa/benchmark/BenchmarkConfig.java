@@ -127,7 +127,7 @@ public record BenchmarkConfig(
                   java ... -jar anaxa-benchmark.jar [--profile=standard] [--keep-data]
                 
                 Common options:
-                  --profile=quick|standard|markdown-kb|full
+                  --profile=quick|standard|markdown-kb|scorer-eval|full
                   --collection-prefix=<prefix>
                   --request-timeout-seconds=<seconds>
                 

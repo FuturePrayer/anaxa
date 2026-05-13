@@ -5,7 +5,7 @@
 - JDK 26
 - Maven 3.9+
 - 运行时需要 `--enable-preview`
-- 向量计算依赖 `jdk.incubator.vector`
+- 运行时仍需要 `--enable-preview`，当前用于 `ScopedValue` / `StructuredTaskScope`
 
 本地环境示例：
 
@@ -30,7 +30,7 @@ anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar
 ### 3.1 最小启动命令
 
 ```powershell
-java --enable-preview --add-modules jdk.incubator.vector `
+java --enable-preview `
   -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
   --data-dir=D:\anaxa-data `
   --allow-open-access=true
@@ -41,7 +41,7 @@ java --enable-preview --add-modules jdk.incubator.vector `
 ### 3.2 推荐启动命令
 
 ```powershell
-java --enable-preview --add-modules jdk.incubator.vector `
+java --enable-preview `
   -XX:+UseZGC `
   -Xms256m -Xmx1g `
   -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
@@ -59,7 +59,8 @@ java --enable-preview --add-modules jdk.incubator.vector `
   --audit-log=D:\anaxa-data\audit\audit.log `
   --backup-dir=D:\anaxa-data\backups `
   --snapshot-interval-seconds=900 `
-  --snapshot-retention-per-collection=7
+  --snapshot-retention-per-collection=7 `
+  --web-ui-enabled=true
 ```
 
 > 某些 JDK 26 build 可能不接受 `-XX:+ZGenerational`；如果启动时报错，移除该参数即可。
@@ -84,6 +85,7 @@ java --enable-preview --add-modules jdk.incubator.vector `
 | `--snapshot-interval-seconds` | `0` | 自动 snapshot 周期；`0` 表示关闭 |
 | `--snapshot-retention-per-collection` | `7` | 每个 collection 自动 snapshot 保留份数 |
 | `--allow-open-access` | `false` | 是否允许无 API key 启动；生产必须保持 `false` |
+| `--web-ui-enabled` | `true` | 是否启用内置 WebUI；关闭后 `/ui` 返回 404 |
 
 ## 5. 部署建议
 
@@ -126,6 +128,12 @@ java --enable-preview --add-modules jdk.incubator.vector `
 - NDJSON / binary 是流式分批写入，超限前已经提交的批次不会自动回滚
 - `--max-concurrent-requests` 用于限制 HTTP 层并发处理数量，超限返回 `503` 并带 `Retry-After: 1`
 - 生产环境建议在反向代理层同时设置 TLS、连接超时、读超时、请求头大小和请求体大小限制
+
+### 5.6 WebUI
+
+- 服务默认启用内置测试控制台：`http://127.0.0.1:8080/ui`
+- WebUI 页面本身不要求 API key，但页面发出的数据库请求仍然走现有 API Key / RBAC / tenant 校验
+- 如果生产环境不希望暴露测试页面，可设置 `--web-ui-enabled=false`
 
 ## 6. tenant / API key 文件示例
 

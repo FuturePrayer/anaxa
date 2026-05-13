@@ -28,6 +28,7 @@ import cn.suhoan.anaxa.storage.WalReplay;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -1324,6 +1325,8 @@ final class EngineCollection implements AutoCloseable {
         }
         try {
             return Files.size(path);
+        } catch (NoSuchFileException exception) {
+            return 0L;
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to read file size for " + path, exception);
         }

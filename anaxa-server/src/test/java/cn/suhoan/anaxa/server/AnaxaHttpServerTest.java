@@ -489,6 +489,80 @@ class AnaxaHttpServerTest {
     }
 
     @Test
+    void servesWebUiAndCanDisableIt() throws Exception {
+        Path dataDir = tempDir.resolve("http-webui");
+        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig(
+                "127.0.0.1",
+                0,
+                dataDir,
+                96L,
+                Set.of("secret"),
+                null,
+                10_000,
+                100,
+                0L,
+                dataDir.resolve("audit").resolve("audit.log"),
+                dataDir.resolve("backups"),
+                0L,
+                7,
+                ServerConfig.DEFAULT_MAX_REQUEST_BODY_BYTES,
+                ServerConfig.DEFAULT_MAX_CONCURRENT_REQUESTS,
+                false,
+                true
+        ))) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.port();
+
+            HttpResponse<String> index = client.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/ui")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, index.statusCode());
+            assertTrue(index.body().contains("AnaxaDB Web UI") || index.body().contains("Vector Database Test Console"));
+            assertTrue(index.headers().firstValue("Content-Type").orElse("").contains("text/html"));
+
+            HttpResponse<String> script = client.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/ui/app.js")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, script.statusCode());
+            assertTrue(script.body().contains("api(method"));
+            assertTrue(script.headers().firstValue("Content-Type").orElse("").contains("javascript"));
+        }
+
+        Path disabledDataDir = tempDir.resolve("http-webui-disabled");
+        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig(
+                "127.0.0.1",
+                0,
+                disabledDataDir,
+                96L,
+                Set.of("secret"),
+                null,
+                10_000,
+                100,
+                0L,
+                disabledDataDir.resolve("audit").resolve("audit.log"),
+                disabledDataDir.resolve("backups"),
+                0L,
+                7,
+                ServerConfig.DEFAULT_MAX_REQUEST_BODY_BYTES,
+                ServerConfig.DEFAULT_MAX_CONCURRENT_REQUESTS,
+                false,
+                false
+        ))) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.port();
+            HttpResponse<String> disabled = client.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/ui")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(404, disabled.statusCode());
+        }
+    }
+
+    @Test
     void rateLimitsProtectedRequests() throws Exception {
         try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig(
                 "127.0.0.1",

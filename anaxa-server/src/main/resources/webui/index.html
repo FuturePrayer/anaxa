@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AnaxaDB Web UI</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">AnaxaDB</p>
+      <h1>Vector Database Test Console</h1>
+    </div>
+    <div id="statusPill" class="status-pill muted">Not checked</div>
+  </header>
+
+  <main class="shell">
+    <aside class="sidebar">
+      <section class="card">
+        <h2>Connection</h2>
+        <label>Base URL
+          <input id="baseUrl" type="text" placeholder="http://127.0.0.1:8080">
+        </label>
+        <label>API Key
+          <input id="apiKey" type="password" placeholder="X-API-Key">
+        </label>
+        <label>Tenant ID
+          <input id="tenantId" type="text" placeholder="default">
+        </label>
+        <div class="button-row">
+          <button id="saveConfig" class="secondary">Save</button>
+          <button id="checkHealth">Health</button>
+        </div>
+      </section>
+
+      <section class="card collections-card">
+        <div class="card-title-row">
+          <h2>Collections</h2>
+          <button id="refreshCollections" class="icon-button" title="Refresh">↻</button>
+        </div>
+        <div id="collectionList" class="collection-list"></div>
+      </section>
+    </aside>
+
+    <section class="workspace">
+      <nav class="tabs" aria-label="Operations">
+        <button class="tab active" data-tab="create">Create</button>
+        <button class="tab" data-tab="upsert">Upsert</button>
+        <button class="tab" data-tab="search">Search</button>
+        <button class="tab" data-tab="mutate">Update/Delete</button>
+        <button class="tab" data-tab="ops">Ops</button>
+        <button class="tab" data-tab="raw">Raw</button>
+      </nav>
+
+      <section id="tab-create" class="panel active">
+        <div class="grid two">
+          <div class="card">
+            <h2>Create Collection</h2>
+            <label>Name <input id="createName" type="text" value="docs"></label>
+            <label>Dimension <input id="createDimension" type="number" min="1" value="3"></label>
+            <label>Metric
+              <select id="createMetric">
+                <option value="COSINE">COSINE</option>
+                <option value="L2">L2</option>
+              </select>
+            </label>
+            <label>Flush Threshold Bytes <input id="createFlushThreshold" type="number" min="1" value="1048576"></label>
+            <button id="createCollection">Create</button>
+          </div>
+          <div class="card">
+            <h2>Selected Collection</h2>
+            <p class="hint">当前选中集合会用于 upsert、search、delete、flush、compact 等操作。</p>
+            <pre id="selectedStats" class="output small">No collection selected.</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-upsert" class="panel">
+        <div class="grid two">
+          <div class="card">
+            <h2>Single Vector</h2>
+            <label>ID <input id="singleId" type="text" value="alpha"></label>
+            <label>Vector <input id="singleVector" type="text" value="1,0,0"></label>
+            <label>Payload JSON <textarea id="singlePayload" rows="6">{"category":"guide","path":"docs/intro.md"}</textarea></label>
+            <div class="button-row">
+              <button id="randomSingleVector" class="secondary">Random Vector</button>
+              <button id="upsertSingle">Upsert</button>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Generate Batch</h2>
+            <label>Prefix <input id="batchPrefix" type="text" value="doc"></label>
+            <label>Count <input id="batchCount" type="number" min="1" max="10000" value="10"></label>
+            <label>Dimension <input id="batchDimension" type="number" min="1" value="3"></label>
+            <label>Payload Template JSON <textarea id="batchPayload" rows="5">{"source":"webui","group":"demo"}</textarea></label>
+            <button id="upsertBatch">Generate & Upsert</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-search" class="panel">
+        <div class="grid search-grid">
+          <div class="card">
+            <h2>Search</h2>
+            <label>Query Vector <input id="searchVector" type="text" value="1,0,0"></label>
+            <label>Top K <input id="topK" type="number" min="1" value="5"></label>
+            <label>Filter JSON <textarea id="filterJson" rows="8">{}</textarea></label>
+            <div class="button-row">
+              <button id="randomSearchVector" class="secondary">Random Vector</button>
+              <button id="searchCollection">Search</button>
+            </div>
+          </div>
+          <div class="card results-card">
+            <h2>Hits</h2>
+            <div id="searchSummary" class="hint">No search yet.</div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>#</th><th>ID</th><th>Score</th><th>Sequence</th><th>Payload</th></tr></thead>
+                <tbody id="hitsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-mutate" class="panel">
+        <div class="grid two">
+          <div class="card">
+            <h2>Partial Update</h2>
+            <label>Updates JSON <textarea id="updatesJson" rows="12">{
+  "updates": [
+    {"id":"alpha","payload":{"title":"Intro v2","obsolete":null}}
+  ]
+}</textarea></label>
+            <button id="partialUpdate">Patch Payload</button>
+          </div>
+          <div class="card">
+            <h2>Delete Vectors</h2>
+            <label>IDs, comma or newline separated <textarea id="deleteIds" rows="8">beta</textarea></label>
+            <button id="deleteVectors" class="danger">Delete</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-ops" class="panel">
+        <div class="grid two">
+          <div class="card">
+            <h2>Collection Ops</h2>
+            <div class="button-row wrap">
+              <button id="flushCollection">Flush</button>
+              <button id="compactCollection">Compact</button>
+              <button id="getCollectionStats" class="secondary">Stats</button>
+            </div>
+            <label>Backup ID <input id="backupId" type="text" value="manual-webui"></label>
+            <button id="backupCollection">Backup</button>
+          </div>
+          <div class="card">
+            <h2>Backup / Restore / Metrics</h2>
+            <div class="button-row wrap">
+              <button id="listBackups" class="secondary">List Backups</button>
+              <button id="loadMetrics" class="secondary">Metrics</button>
+            </div>
+            <label>Restore Backup ID <input id="restoreBackupId" type="text" value="manual-webui"></label>
+            <label>Source Collection <input id="restoreSource" type="text" value="docs"></label>
+            <label>Target Collection <input id="restoreTarget" type="text" value="docs-restored"></label>
+            <button id="restoreCollection">Restore</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-raw" class="panel">
+        <div class="grid two">
+          <div class="card">
+            <h2>Raw Request</h2>
+            <label>Method
+              <select id="rawMethod">
+                <option>GET</option>
+                <option>POST</option>
+                <option>PATCH</option>
+              </select>
+            </label>
+            <label>Path <input id="rawPath" type="text" value="/collections"></label>
+            <label>Body JSON <textarea id="rawBody" rows="10"></textarea></label>
+            <button id="sendRaw">Send</button>
+          </div>
+          <div class="card">
+            <h2>Last Response</h2>
+            <pre id="lastResponse" class="output">No request yet.</pre>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

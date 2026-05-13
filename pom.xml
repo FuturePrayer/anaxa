@@ -27,7 +27,7 @@
         <jackson.version>3.1.2</jackson.version>
         <junit.version>6.0.3</junit.version>
         <slf4j.version>2.0.17</slf4j.version>
-        <preview.argLine>--enable-preview --add-modules jdk.incubator.vector</preview.argLine>
+        <preview.argLine>--enable-preview</preview.argLine>
     </properties>
 
     <dependencyManagement>
@@ -63,8 +63,6 @@
                         <parameters>${maven.compiler.parameters}</parameters>
                         <compilerArgs>
                             <arg>--enable-preview</arg>
-                            <arg>--add-modules</arg>
-                            <arg>jdk.incubator.vector</arg>
                         </compilerArgs>
                     </configuration>
                 </plugin>

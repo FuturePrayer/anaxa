@@ -38,6 +38,18 @@ public enum ScenarioPreset {
             );
         }
     },
+    SCORER_EVAL("scorer-eval") {
+        @Override
+        public List<BenchmarkScenario> scenarios(long defaultFlushThresholdBytes) {
+            return List.of(
+                    customScenario("cosine-128-prepared", "cosine-128", 128, MetricType.COSINE, 12_000, 8, 10, 0, false, 200, 2_000, defaultFlushThresholdBytes, PrepareMode.FLUSH),
+                    customScenario("cosine-384-top50-filter", "topk-filter", 384, MetricType.COSINE, 15_000, 8, 50, 64, true, 200, 2_000, defaultFlushThresholdBytes, PrepareMode.FLUSH),
+                    customScenario("cosine-384-selective-filter", "selective-filter", 384, MetricType.COSINE, 15_000, 8, 10, 512, true, 200, 2_000, defaultFlushThresholdBytes, PrepareMode.FLUSH),
+                    customScenario("l2-384-prepared", "l2-384", 384, MetricType.L2, 15_000, 8, 10, 0, false, 200, 2_000, defaultFlushThresholdBytes, PrepareMode.FLUSH),
+                    customScenario("cosine-1536-highdim", "highdim", 1_536, MetricType.COSINE, 12_000, 12, 10, 128, true, 200, 2_000, defaultFlushThresholdBytes, PrepareMode.FLUSH)
+            );
+        }
+    },
     FULL("full") {
         @Override
         public List<BenchmarkScenario> scenarios(long defaultFlushThresholdBytes) {
@@ -129,6 +141,39 @@ public enum ScenarioPreset {
                 10,
                 groupCount,
                 true,
+                prepareMode
+        );
+    }
+
+    private static BenchmarkScenario customScenario(
+            String name,
+            String family,
+            int dimension,
+            MetricType metric,
+            int vectorCount,
+            int searchWorkers,
+            int topK,
+            int groupCount,
+            boolean useFilter,
+            int warmupRequests,
+            int searchRequests,
+            long defaultFlushThresholdBytes,
+            PrepareMode prepareMode
+    ) {
+        return new BenchmarkScenario(
+                name,
+                family,
+                dimension,
+                metric,
+                Math.min(defaultFlushThresholdBytes, 16L * 1024L * 1024L),
+                vectorCount,
+                100,
+                warmupRequests,
+                searchRequests,
+                searchWorkers,
+                topK,
+                groupCount,
+                useFilter,
                 prepareMode
         );
     }

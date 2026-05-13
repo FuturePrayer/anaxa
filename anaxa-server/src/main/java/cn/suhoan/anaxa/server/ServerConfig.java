@@ -24,7 +24,8 @@ public record ServerConfig(
         int autoSnapshotRetentionPerCollection,
         long maxRequestBodyBytes,
         int maxConcurrentRequests,
-        boolean allowOpenAccess
+        boolean allowOpenAccess,
+        boolean webUiEnabled
 ) {
     public static final long DEFAULT_MAX_REQUEST_BODY_BYTES = 256L * 1024L * 1024L;
     public static final int DEFAULT_MAX_CONCURRENT_REQUESTS = 1_024;
@@ -46,7 +47,8 @@ public record ServerConfig(
                 7,
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
-                false
+                false,
+                true
         );
     }
 
@@ -67,6 +69,7 @@ public record ServerConfig(
                 7,
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
+                true,
                 true
         );
     }
@@ -96,7 +99,8 @@ public record ServerConfig(
                 7,
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
-                false
+                false,
+                true
         );
     }
 
@@ -129,7 +133,8 @@ public record ServerConfig(
                 7,
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
-                false
+                false,
+                true
         );
     }
 
@@ -164,7 +169,8 @@ public record ServerConfig(
                 autoSnapshotRetentionPerCollection,
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
-                false
+                false,
+                true
         );
     }
 
@@ -201,7 +207,47 @@ public record ServerConfig(
                 autoSnapshotRetentionPerCollection,
                 maxRequestBodyBytes,
                 maxConcurrentRequests,
-                false
+                false,
+                true
+        );
+    }
+
+    public ServerConfig(
+            String host,
+            int port,
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            Set<String> apiKeys,
+            Path apiKeyFile,
+            int rateLimitPerMinute,
+            int rateLimitBurst,
+            long slowQueryThresholdMillis,
+            Path auditLogPath,
+            Path backupDirectory,
+            long snapshotIntervalSeconds,
+            int autoSnapshotRetentionPerCollection,
+            long maxRequestBodyBytes,
+            int maxConcurrentRequests,
+            boolean allowOpenAccess
+    ) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                apiKeys,
+                apiKeyFile,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                slowQueryThresholdMillis,
+                auditLogPath,
+                backupDirectory,
+                snapshotIntervalSeconds,
+                autoSnapshotRetentionPerCollection,
+                maxRequestBodyBytes,
+                maxConcurrentRequests,
+                allowOpenAccess,
+                true
         );
     }
 
@@ -265,6 +311,7 @@ public record ServerConfig(
         long maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES;
         int maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS;
         boolean allowOpenAccess = false;
+        boolean webUiEnabled = true;
 
         for (String arg : args) {
             if (!arg.startsWith("--") || !arg.contains("=")) {
@@ -290,6 +337,7 @@ public record ServerConfig(
                 case "max-request-body-bytes" -> maxRequestBodyBytes = Long.parseLong(value);
                 case "max-concurrent-requests" -> maxConcurrentRequests = Integer.parseInt(value);
                 case "allow-open-access" -> allowOpenAccess = Boolean.parseBoolean(value);
+                case "web-ui-enabled" -> webUiEnabled = Boolean.parseBoolean(value);
                 default -> throw new IllegalArgumentException("Unknown argument: --" + key);
             }
         }
@@ -310,7 +358,8 @@ public record ServerConfig(
                 autoSnapshotRetentionPerCollection,
                 maxRequestBodyBytes,
                 maxConcurrentRequests,
-                allowOpenAccess
+                allowOpenAccess,
+                webUiEnabled
         );
     }
 

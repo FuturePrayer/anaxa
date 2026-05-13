@@ -207,6 +207,10 @@ public final class AnaxaHttpServer implements AutoCloseable {
         List<String> path = pathSegments(exchange.getRequestURI());
         String method = exchange.getRequestMethod();
 
+        if (!path.isEmpty() && "ui".equals(path.getFirst())) {
+            return serveWebUi(exchange, context, path);
+        }
+
         if (path.size() == 1 && "health".equals(path.getFirst())) {
             requireMethod(method, "GET");
             return writeJson(exchange, 200, new HealthResponse("UP"), context);
@@ -547,6 +551,62 @@ public final class AnaxaHttpServer implements AutoCloseable {
         return statusCode;
     }
 
+    private int writeBytes(HttpExchange exchange, int statusCode, byte[] body, String contentType, RequestContext context)
+            throws IOException {
+        Headers headers = exchange.getResponseHeaders();
+        headers.set("Content-Type", contentType);
+        headers.set("X-Trace-Id", context.traceId());
+        exchange.sendResponseHeaders(statusCode, body.length);
+        try (OutputStream output = exchange.getResponseBody()) {
+            output.write(body);
+        }
+        return statusCode;
+    }
+
+    private int serveWebUi(HttpExchange exchange, RequestContext context, List<String> path) throws IOException {
+        requireMethod(exchange.getRequestMethod(), "GET");
+        if (!config.webUiEnabled()) {
+            throw new HttpStatusException(404, "Endpoint not found");
+        }
+
+        String resourceName;
+        if (path.size() == 1) {
+            resourceName = "index.html";
+        } else if (path.size() == 2) {
+            resourceName = path.get(1);
+        } else {
+            throw new HttpStatusException(404, "Web UI resource not found");
+        }
+
+        if (!resourceName.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")) {
+            throw new HttpStatusException(404, "Web UI resource not found");
+        }
+
+        String resourcePath = "/webui/" + resourceName;
+        try (InputStream input = AnaxaHttpServer.class.getResourceAsStream(resourcePath)) {
+            if (input == null) {
+                throw new HttpStatusException(404, "Web UI resource not found");
+            }
+            return writeBytes(exchange, 200, input.readAllBytes(), contentTypeFor(resourceName), context);
+        }
+    }
+
+    private String contentTypeFor(String resourceName) {
+        if (resourceName.endsWith(".html")) {
+            return "text/html; charset=utf-8";
+        }
+        if (resourceName.endsWith(".css")) {
+            return "text/css; charset=utf-8";
+        }
+        if (resourceName.endsWith(".js")) {
+            return "application/javascript; charset=utf-8";
+        }
+        if (resourceName.endsWith(".svg")) {
+            return "image/svg+xml";
+        }
+        return "application/octet-stream";
+    }
+
     private int writeError(HttpExchange exchange, RequestContext context, Exception exception, Map<String, String> extraHeaders)
             throws IOException {
         Throwable cause = exception instanceof java.lang.reflect.InvocationTargetException invocation && invocation.getCause() != null
@@ -655,6 +715,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
     private Role requiredRole(String method, String route) {
         return switch (route) {
             case "/health" -> null;
+            case "/ui" -> null;
             case "/metrics" -> Role.ADMIN;
             case "/tenants", "/tenants/{id}", "/backups" -> Role.READER;
             case "/collections" -> "GET".equals(method) ? Role.READER : Role.WRITER;
@@ -675,6 +736,9 @@ public final class AnaxaHttpServer implements AutoCloseable {
         List<String> path = pathSegments(uri);
         if (path.size() == 1 && "health".equals(path.getFirst())) {
             return "/health";
+        }
+        if (!path.isEmpty() && "ui".equals(path.getFirst())) {
+            return "/ui";
         }
         if (path.size() == 1 && "metrics".equals(path.getFirst())) {
             return "/metrics";
