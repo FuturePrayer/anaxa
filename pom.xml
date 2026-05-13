@@ -10,6 +10,32 @@
     <packaging>pom</packaging>
     <name>AnaxaDB</name>
 
+    <licenses>
+        <license>
+            <name>Apache License 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>manual</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>1</id>
+            <name>Wang Zefeng</name>
+            <email>sihuangwlp@petalmail.com</email>
+            <url>https://suhoan.cn</url>
+            <roles>
+                <role>owner</role>
+            </roles>
+            <timezone>Asia/Shanghai</timezone>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/FuturePrayer/anaxa.git</connection>
+        <developerConnection/>
+        <tag/>
+        <url>https://github.com/FuturePrayer/anaxa</url>
+    </scm>
+
     <modules>
         <module>anaxa-common</module>
         <module>anaxa-sdk</module>
