@@ -21,8 +21,14 @@ public record ServerConfig(
         Path auditLogPath,
         Path backupDirectory,
         long snapshotIntervalSeconds,
-        int autoSnapshotRetentionPerCollection
+        int autoSnapshotRetentionPerCollection,
+        long maxRequestBodyBytes,
+        int maxConcurrentRequests,
+        boolean allowOpenAccess
 ) {
+    public static final long DEFAULT_MAX_REQUEST_BODY_BYTES = 256L * 1024L * 1024L;
+    public static final int DEFAULT_MAX_CONCURRENT_REQUESTS = 1_024;
+
     public ServerConfig(String host, int port, Path dataDirectory, long defaultFlushThresholdBytes) {
         this(
                 host,
@@ -37,7 +43,31 @@ public record ServerConfig(
                 dataDirectory.resolve("audit").resolve("audit.log"),
                 dataDirectory.resolve("backups"),
                 0L,
-                7
+                7,
+                DEFAULT_MAX_REQUEST_BODY_BYTES,
+                DEFAULT_MAX_CONCURRENT_REQUESTS,
+                false
+        );
+    }
+
+    public static ServerConfig openAccess(String host, int port, Path dataDirectory, long defaultFlushThresholdBytes) {
+        return new ServerConfig(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                Set.of(),
+                null,
+                6_000,
+                256,
+                250L,
+                dataDirectory.resolve("audit").resolve("audit.log"),
+                dataDirectory.resolve("backups"),
+                0L,
+                7,
+                DEFAULT_MAX_REQUEST_BODY_BYTES,
+                DEFAULT_MAX_CONCURRENT_REQUESTS,
+                true
         );
     }
 
@@ -63,7 +93,10 @@ public record ServerConfig(
                 dataDirectory.resolve("audit").resolve("audit.log"),
                 dataDirectory.resolve("backups"),
                 0L,
-                7
+                7,
+                DEFAULT_MAX_REQUEST_BODY_BYTES,
+                DEFAULT_MAX_CONCURRENT_REQUESTS,
+                false
         );
     }
 
@@ -93,7 +126,82 @@ public record ServerConfig(
                 auditLogPath,
                 backupDirectory,
                 0L,
-                7
+                7,
+                DEFAULT_MAX_REQUEST_BODY_BYTES,
+                DEFAULT_MAX_CONCURRENT_REQUESTS,
+                false
+        );
+    }
+
+    public ServerConfig(
+            String host,
+            int port,
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            Set<String> apiKeys,
+            Path apiKeyFile,
+            int rateLimitPerMinute,
+            int rateLimitBurst,
+            long slowQueryThresholdMillis,
+            Path auditLogPath,
+            Path backupDirectory,
+            long snapshotIntervalSeconds,
+            int autoSnapshotRetentionPerCollection
+    ) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                apiKeys,
+                apiKeyFile,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                slowQueryThresholdMillis,
+                auditLogPath,
+                backupDirectory,
+                snapshotIntervalSeconds,
+                autoSnapshotRetentionPerCollection,
+                DEFAULT_MAX_REQUEST_BODY_BYTES,
+                DEFAULT_MAX_CONCURRENT_REQUESTS,
+                false
+        );
+    }
+
+    public ServerConfig(
+            String host,
+            int port,
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            Set<String> apiKeys,
+            Path apiKeyFile,
+            int rateLimitPerMinute,
+            int rateLimitBurst,
+            long slowQueryThresholdMillis,
+            Path auditLogPath,
+            Path backupDirectory,
+            long snapshotIntervalSeconds,
+            int autoSnapshotRetentionPerCollection,
+            long maxRequestBodyBytes,
+            int maxConcurrentRequests
+    ) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                apiKeys,
+                apiKeyFile,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                slowQueryThresholdMillis,
+                auditLogPath,
+                backupDirectory,
+                snapshotIntervalSeconds,
+                autoSnapshotRetentionPerCollection,
+                maxRequestBodyBytes,
+                maxConcurrentRequests,
+                false
         );
     }
 
@@ -127,6 +235,17 @@ public record ServerConfig(
         if (autoSnapshotRetentionPerCollection < 0) {
             throw new IllegalArgumentException("autoSnapshotRetentionPerCollection must not be negative");
         }
+        if (maxRequestBodyBytes < 0L) {
+            throw new IllegalArgumentException("maxRequestBodyBytes must not be negative");
+        }
+        if (maxConcurrentRequests <= 0) {
+            throw new IllegalArgumentException("maxConcurrentRequests must be positive");
+        }
+        if (!allowOpenAccess && apiKeys.isEmpty() && apiKeyFile == null) {
+            throw new IllegalArgumentException(
+                    "API keys are required unless --allow-open-access=true is explicitly set"
+            );
+        }
     }
 
     public static ServerConfig fromArgs(String[] args) {
@@ -143,6 +262,9 @@ public record ServerConfig(
         Path backupDirectory = null;
         long snapshotIntervalSeconds = 0L;
         int autoSnapshotRetentionPerCollection = 7;
+        long maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES;
+        int maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS;
+        boolean allowOpenAccess = false;
 
         for (String arg : args) {
             if (!arg.startsWith("--") || !arg.contains("=")) {
@@ -165,6 +287,9 @@ public record ServerConfig(
                 case "backup-dir" -> backupDirectory = Paths.get(value);
                 case "snapshot-interval-seconds" -> snapshotIntervalSeconds = Long.parseLong(value);
                 case "snapshot-retention-per-collection" -> autoSnapshotRetentionPerCollection = Integer.parseInt(value);
+                case "max-request-body-bytes" -> maxRequestBodyBytes = Long.parseLong(value);
+                case "max-concurrent-requests" -> maxConcurrentRequests = Integer.parseInt(value);
+                case "allow-open-access" -> allowOpenAccess = Boolean.parseBoolean(value);
                 default -> throw new IllegalArgumentException("Unknown argument: --" + key);
             }
         }
@@ -182,7 +307,10 @@ public record ServerConfig(
                 auditLogPath,
                 backupDirectory,
                 snapshotIntervalSeconds,
-                autoSnapshotRetentionPerCollection
+                autoSnapshotRetentionPerCollection,
+                maxRequestBodyBytes,
+                maxConcurrentRequests,
+                allowOpenAccess
         );
     }
 

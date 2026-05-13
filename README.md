@@ -26,10 +26,13 @@ AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已
 2. 启动服务
 
    ```powershell
-   java --enable-preview --add-modules jdk.incubator.vector `
-     -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
-     --data-dir=D:\anaxa-data
-   ```
+    java --enable-preview --add-modules jdk.incubator.vector `
+      -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
+      --data-dir=D:\anaxa-data `
+      --allow-open-access=true
+    ```
+
+   `--allow-open-access=true` 仅用于本地快速体验；生产环境必须配置 `--api-keys` 或 `--api-key-file`。
 
 3. 创建集合
 

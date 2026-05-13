@@ -1,6 +1,7 @@
 package cn.suhoan.anaxa.server;
 
 import cn.suhoan.anaxa.common.model.BackupSummary;
+import cn.suhoan.anaxa.common.model.BackupIds;
 import cn.suhoan.anaxa.common.model.CollectionStats;
 import cn.suhoan.anaxa.common.model.TenantSnapshotResult;
 import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
@@ -67,6 +68,7 @@ final class BackupLifecycleManager implements AutoCloseable {
         String backupId = requestedBackupId == null || requestedBackupId.isBlank()
                 ? "manual-%s-%s".formatted(tenantId, TIMESTAMP_FORMAT.format(Instant.now()))
                 : requestedBackupId.trim();
+        backupId = BackupIds.normalize(backupId);
         List<CollectionStats> collections = engine.listCollections(tenantId);
         if (collections.isEmpty()) {
             return new TenantSnapshotResult(backupId, List.of());

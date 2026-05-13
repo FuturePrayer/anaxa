@@ -1,6 +1,7 @@
 package cn.suhoan.anaxa.server;
 
 import cn.suhoan.anaxa.common.model.BackupSummary;
+import cn.suhoan.anaxa.common.model.BackupIds;
 import cn.suhoan.anaxa.common.model.CollectionDefinition;
 import cn.suhoan.anaxa.common.model.CollectionStats;
 import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
@@ -57,7 +58,7 @@ final class BackupCatalog {
     }
 
     static void deleteBackup(Path backupDirectory, String backupId) throws IOException {
-        deleteRecursively(backupDirectory.resolve(backupId));
+        deleteRecursively(backupDirectory.resolve(BackupIds.normalize(backupId)));
     }
 
     private static void collectDefaultTenantCollections(

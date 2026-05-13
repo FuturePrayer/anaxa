@@ -27,6 +27,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.BufferedInputStream;
 import java.net.InetSocketAddress;
@@ -43,6 +44,9 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 public final class AnaxaHttpServer implements AutoCloseable {
     private static final ScopedValue<RequestContext> CURRENT_REQUEST = ScopedValue.newInstance();
@@ -58,6 +62,8 @@ public final class AnaxaHttpServer implements AutoCloseable {
     private final AuditLogger auditLogger;
     private final ServerConfig config;
     private final BackupLifecycleManager backupLifecycle;
+    private final Semaphore requestPermits;
+    private final ConcurrentHashMap<String, ReentrantLock> tenantQuotaLocks;
 
     public AnaxaHttpServer(ServerConfig config) throws IOException {
         this(new MetricsRegistry(), config);
@@ -87,6 +93,8 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 config.autoSnapshotRetentionPerCollection(),
                 metrics
         );
+        this.requestPermits = new Semaphore(config.maxConcurrentRequests());
+        this.tenantQuotaLocks = new ConcurrentHashMap<>();
         this.server.setExecutor(requestExecutor);
         this.server.createContext("/", this::handleExchange);
     }
@@ -126,7 +134,21 @@ public final class AnaxaHttpServer implements AutoCloseable {
         TenantScope tenantScope = TenantScope.all();
         long startedAtNanos = System.nanoTime();
         int statusCode = 500;
+        boolean permitAcquired = false;
         try {
+            if (requiresConcurrencyPermit(route)) {
+                permitAcquired = requestPermits.tryAcquire();
+                if (!permitAcquired) {
+                    metrics.recordOverloadRejected();
+                    statusCode = writeError(
+                            exchange,
+                            context,
+                            new HttpStatusException(503, "Server is overloaded"),
+                            Map.of("Retry-After", "1")
+                    );
+                    return;
+                }
+            }
             principal = authorize(exchange, requiredRole(method, route));
             tenantScope = resolveTenantScope(exchange, principal, allowsAllTenants(route, method));
             RateLimitPolicy rateLimitPolicy = resolveRateLimitPolicy(tenantScope);
@@ -161,6 +183,9 @@ public final class AnaxaHttpServer implements AutoCloseable {
         } catch (Exception exception) {
             statusCode = writeError(exchange, context, exception, Map.of());
         } finally {
+            if (permitAcquired) {
+                requestPermits.release();
+            }
             long durationNanos = System.nanoTime() - startedAtNanos;
             metrics.recordRequest(method, route, statusCode, durationNanos);
             auditLogger.log(
@@ -280,11 +305,25 @@ public final class AnaxaHttpServer implements AutoCloseable {
 
     private int createCollection(HttpExchange exchange, RequestContext context, String tenantId) throws IOException {
         CreateCollectionRequest request = readBody(exchange, CreateCollectionRequest.class);
-        if (!collectionExists(tenantId, request.name())) {
-            enforceCollectionQuota(tenantId, tenantUsage(tenantId), 1);
+        CollectionStats stats = withTenantQuotaLock(tenantId, () -> {
+            if (!collectionExists(tenantId, request.name())) {
+                enforceCollectionQuota(tenantId, tenantUsage(tenantId), 1);
+            }
+            var definition = engine.createCollection(tenantId, request);
+            return engine.stats(definition.tenantId(), definition.name());
+        });
+        return writeJson(exchange, 201, stats, context);
+    }
+
+    private <T> T withTenantQuotaLock(String tenantId, QuotaOperation<T> operation) {
+        String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
+        ReentrantLock lock = tenantQuotaLocks.computeIfAbsent(normalizedTenantId, ignored -> new ReentrantLock());
+        lock.lock();
+        try {
+            return operation.run();
+        } finally {
+            lock.unlock();
         }
-        var definition = engine.createCollection(tenantId, request);
-        return writeJson(exchange, 201, engine.stats(definition.tenantId(), definition.name()), context);
     }
 
     private int upsertVectors(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
@@ -295,25 +334,18 @@ public final class AnaxaHttpServer implements AutoCloseable {
             return upsertVectorsBinary(exchange, context, tenantId, collectionName);
         }
         UpsertVectorsRequest request = readBody(exchange, UpsertVectorsRequest.class);
-        TenantUsage usage = tenantUsage(tenantId);
-        enforceVectorQuota(
-                tenantId,
-                usage,
-                engine.estimateAdditionalLiveVectors(tenantId, collectionName, request)
-        );
-        enforceStorageQuota(
-                tenantId,
-                usage,
-                engine.estimateUpsertBytes(tenantId, collectionName, request)
-        );
-        engine.upsert(tenantId, collectionName, request);
-        return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
+        CollectionStats stats = withTenantQuotaLock(tenantId, () -> {
+            enforceUpsertQuota(tenantId, collectionName, request);
+            engine.upsert(tenantId, collectionName, request);
+            return engine.stats(tenantId, collectionName);
+        });
+        return writeJson(exchange, 200, stats, context);
     }
 
     private int upsertVectorsNdjson(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
         ArrayList<UpsertVector> batch = new ArrayList<>(NDJSON_UPSERT_BATCH_SIZE);
         long[] ingested = {0L};
-        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
+        try (BufferedInputStream requestBody = new BufferedInputStream(limitedRequestBody(exchange))) {
             JsonSupport.readNdjson(requestBody, UpsertVector.class, vector -> {
                 batch.add(vector);
                 ingested[0]++;
@@ -333,7 +365,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
             throws IOException {
         int dimension = engine.stats(tenantId, collectionName).dimension();
         ArrayList<UpsertVector> batch = new ArrayList<>(BINARY_UPSERT_BATCH_SIZE);
-        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
+        try (BufferedInputStream requestBody = new BufferedInputStream(limitedRequestBody(exchange))) {
             BinaryVectorStreams.readBatch(requestBody, dimension, vector -> {
                 batch.add(vector);
                 if (batch.size() >= BINARY_UPSERT_BATCH_SIZE) {
@@ -350,6 +382,15 @@ public final class AnaxaHttpServer implements AutoCloseable {
             return;
         }
         UpsertVectorsRequest request = new UpsertVectorsRequest(List.copyOf(batch));
+        withTenantQuotaLock(tenantId, () -> {
+            enforceUpsertQuota(tenantId, collectionName, request);
+            engine.upsert(tenantId, collectionName, request);
+            return null;
+        });
+        batch.clear();
+    }
+
+    private void enforceUpsertQuota(String tenantId, String collectionName, UpsertVectorsRequest request) {
         TenantUsage usage = tenantUsage(tenantId);
         enforceVectorQuota(
                 tenantId,
@@ -361,8 +402,6 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 usage,
                 engine.estimateUpsertBytes(tenantId, collectionName, request)
         );
-        engine.upsert(tenantId, collectionName, request);
-        batch.clear();
     }
 
     private int deleteVectors(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
@@ -374,14 +413,17 @@ public final class AnaxaHttpServer implements AutoCloseable {
     private int partialUpdateVectors(HttpExchange exchange, RequestContext context, String tenantId, String collectionName)
             throws IOException {
         PartialUpdateVectorsRequest request = readBody(exchange, PartialUpdateVectorsRequest.class);
-        TenantUsage usage = tenantUsage(tenantId);
-        enforceStorageQuota(
-                tenantId,
-                usage,
-                engine.estimatePartialUpdateBytes(tenantId, collectionName, request)
-        );
-        engine.partialUpdate(tenantId, collectionName, request);
-        return writeJson(exchange, 200, engine.stats(tenantId, collectionName), context);
+        CollectionStats stats = withTenantQuotaLock(tenantId, () -> {
+            TenantUsage usage = tenantUsage(tenantId);
+            enforceStorageQuota(
+                    tenantId,
+                    usage,
+                    engine.estimatePartialUpdateBytes(tenantId, collectionName, request)
+            );
+            engine.partialUpdate(tenantId, collectionName, request);
+            return engine.stats(tenantId, collectionName);
+        });
+        return writeJson(exchange, 200, stats, context);
     }
 
     private int search(HttpExchange exchange, RequestContext context, String tenantId, String collectionName) throws IOException {
@@ -440,47 +482,43 @@ public final class AnaxaHttpServer implements AutoCloseable {
 
     private int restoreCollection(HttpExchange exchange, RequestContext context, String tenantId, String backupId) throws IOException {
         RestoreCollectionRequest request = readBody(exchange, RestoreCollectionRequest.class);
-        if (collectionExists(tenantId, request.collectionName())) {
-            throw new HttpStatusException(409, "Collection already exists: " + tenantId + "/" + request.collectionName());
-        }
-        CollectionStats preview = engine.previewBackupCollection(tenantId, request.sourceCollection(), backupId, config.backupDirectory());
-        TenantUsage usage = tenantUsage(tenantId);
-        enforceCollectionQuota(tenantId, usage, 1);
-        enforceVectorQuota(tenantId, usage, preview.liveVectorCount());
-        enforceStorageQuota(tenantId, usage, preview.storageBytes());
-        return writeJson(
-                exchange,
-                201,
-                engine.restoreCollection(
+        CollectionStats restored = withTenantQuotaLock(tenantId, () -> {
+            if (collectionExists(tenantId, request.collectionName())) {
+                throw new HttpStatusException(409, "Collection already exists: " + tenantId + "/" + request.collectionName());
+            }
+            CollectionStats preview = engine.previewBackupCollection(tenantId, request.sourceCollection(), backupId, config.backupDirectory());
+            TenantUsage usage = tenantUsage(tenantId);
+            enforceCollectionQuota(tenantId, usage, 1);
+            enforceVectorQuota(tenantId, usage, preview.liveVectorCount());
+            enforceStorageQuota(tenantId, usage, preview.storageBytes());
+            return engine.restoreCollection(
                         tenantId,
                         request.sourceCollection(),
                         request.collectionName(),
                         backupId,
                         config.backupDirectory()
-                ),
-                context
-        );
+            );
+        });
+        return writeJson(exchange, 201, restored, context);
     }
 
     private <T> T readBody(HttpExchange exchange, Class<T> type) throws IOException {
-        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
-            requestBody.mark(1);
-            if (requestBody.read() < 0) {
+        try (InputStream requestBody = limitedRequestBody(exchange)) {
+            byte[] body = requestBody.readAllBytes();
+            if (body.length == 0) {
                 throw new ValidationException("Request body must not be empty");
             }
-            requestBody.reset();
-            return JsonSupport.read(requestBody, type);
+            return JsonSupport.read(body, type);
         }
     }
 
     private String readOptionalBackupId(HttpExchange exchange) throws IOException {
-        try (BufferedInputStream requestBody = new BufferedInputStream(exchange.getRequestBody())) {
-            requestBody.mark(1);
-            if (requestBody.read() < 0) {
+        try (InputStream requestBody = limitedRequestBody(exchange)) {
+            byte[] body = requestBody.readAllBytes();
+            if (body.length == 0) {
                 return null;
             }
-            requestBody.reset();
-            return JsonSupport.read(requestBody, BackupCollectionRequest.class).backupId();
+            return JsonSupport.read(body, BackupCollectionRequest.class).backupId();
         }
     }
 
@@ -516,6 +554,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
                 : exception;
 
         int statusCode = switch (cause) {
+            case PayloadTooLargeException ignored -> 413;
             case ValidationException ignored -> 400;
             case IllegalArgumentException ignored -> 400;
             case NotFoundException ignored -> 404;
@@ -529,6 +568,10 @@ public final class AnaxaHttpServer implements AutoCloseable {
         Headers headers = exchange.getResponseHeaders();
         extraHeaders.forEach(headers::set);
         return writeJson(exchange, statusCode, new ErrorResponse(message, context.traceId()), context);
+    }
+
+    private boolean requiresConcurrencyPermit(String route) {
+        return !"/health".equals(route);
     }
 
     private void requireMethod(String method, String expected) {
@@ -579,6 +622,24 @@ public final class AnaxaHttpServer implements AutoCloseable {
 
     private boolean requiresRateLimit(String route) {
         return !"/health".equals(route);
+    }
+
+    private InputStream limitedRequestBody(HttpExchange exchange) {
+        long maxBytes = config.maxRequestBodyBytes();
+        if (maxBytes <= 0L) {
+            return exchange.getRequestBody();
+        }
+        String contentLength = exchange.getRequestHeaders().getFirst("Content-Length");
+        if (contentLength != null && !contentLength.isBlank()) {
+            try {
+                if (Long.parseLong(contentLength.trim()) > maxBytes) {
+                    throw new PayloadTooLargeException("Request body exceeds max-request-body-bytes=" + maxBytes);
+                }
+            } catch (NumberFormatException ignored) {
+                // Fall back to counting bytes while reading.
+            }
+        }
+        return new LimitedInputStream(exchange.getRequestBody(), maxBytes);
     }
 
     private String rateLimitKey(HttpExchange exchange, AuthenticatedPrincipal principal, TenantScope tenantScope) {
@@ -831,6 +892,53 @@ public final class AnaxaHttpServer implements AutoCloseable {
         }
     }
 
+    private static final class PayloadTooLargeException extends IllegalArgumentException {
+        private PayloadTooLargeException(String message) {
+            super(message);
+        }
+    }
+
+    private static final class LimitedInputStream extends InputStream {
+        private final InputStream delegate;
+        private final long maxBytes;
+        private long bytesRead;
+
+        private LimitedInputStream(InputStream delegate, long maxBytes) {
+            this.delegate = delegate;
+            this.maxBytes = maxBytes;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int value = delegate.read();
+            if (value >= 0) {
+                increment(1L);
+            }
+            return value;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            int count = delegate.read(buffer, offset, length);
+            if (count > 0) {
+                increment(count);
+            }
+            return count;
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private void increment(long count) {
+            bytesRead += count;
+            if (bytesRead > maxBytes) {
+                throw new PayloadTooLargeException("Request body exceeds max-request-body-bytes=" + maxBytes);
+            }
+        }
+    }
+
     private record TenantScope(String tenantId, TenantPolicy policy, boolean allTenants) {
         private static TenantScope all() {
             return new TenantScope(null, null, true);
@@ -846,5 +954,10 @@ public final class AnaxaHttpServer implements AutoCloseable {
     }
 
     private record TenantUsage(int collectionCount, long liveVectorCount, long storageBytes) {
+    }
+
+    @FunctionalInterface
+    private interface QuotaOperation<T> {
+        T run();
     }
 }

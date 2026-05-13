@@ -3,6 +3,7 @@ package cn.suhoan.anaxa.engine;
 import cn.suhoan.anaxa.common.error.NotFoundException;
 import cn.suhoan.anaxa.common.error.ValidationException;
 import cn.suhoan.anaxa.common.json.JsonSupport;
+import cn.suhoan.anaxa.common.model.BackupIds;
 import cn.suhoan.anaxa.common.model.CollectionDefinition;
 import cn.suhoan.anaxa.common.model.CollectionStats;
 import cn.suhoan.anaxa.common.model.CreateCollectionRequest;
@@ -164,9 +165,9 @@ public final class VectorDatabaseEngine implements AutoCloseable {
 
     public CollectionStats backupCollection(String tenantId, String collectionName, String backupId, Path backupDirectory) {
         String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
-        Objects.requireNonNull(backupId, "backupId");
+        String normalizedBackupId = BackupIds.normalize(backupId);
         Objects.requireNonNull(backupDirectory, "backupDirectory");
-        CollectionPaths backupPaths = CollectionPaths.of(backupDirectory.resolve(backupId), normalizedTenantId, collectionName);
+        CollectionPaths backupPaths = CollectionPaths.of(backupDirectory.resolve(normalizedBackupId), normalizedTenantId, collectionName);
         try {
             collection(normalizedTenantId, collectionName).writeBackup(backupPaths);
             return stats(normalizedTenantId, collectionName);
@@ -203,12 +204,12 @@ public final class VectorDatabaseEngine implements AutoCloseable {
         String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
         Objects.requireNonNull(sourceCollectionName, "sourceCollectionName");
         Objects.requireNonNull(targetCollectionName, "targetCollectionName");
-        Objects.requireNonNull(backupId, "backupId");
+        String normalizedBackupId = BackupIds.normalize(backupId);
         Objects.requireNonNull(backupDirectory, "backupDirectory");
 
-        CollectionPaths sourcePaths = CollectionPaths.of(backupDirectory.resolve(backupId), normalizedTenantId, sourceCollectionName);
+        CollectionPaths sourcePaths = CollectionPaths.of(backupDirectory.resolve(normalizedBackupId), normalizedTenantId, sourceCollectionName);
         if (!Files.exists(sourcePaths.metadataFile())) {
-            throw new NotFoundException("Backup not found: " + backupId + "/" + normalizedTenantId + "/" + sourceCollectionName);
+            throw new NotFoundException("Backup not found: " + normalizedBackupId + "/" + normalizedTenantId + "/" + sourceCollectionName);
         }
 
         CollectionPaths targetPaths = CollectionPaths.of(dataDirectory, normalizedTenantId, targetCollectionName);
@@ -250,7 +251,7 @@ public final class VectorDatabaseEngine implements AutoCloseable {
                             + "/"
                             + sourceCollectionName
                             + " from backup "
-                            + backupId,
+                            + normalizedBackupId,
                     exception
             );
         }
@@ -259,19 +260,19 @@ public final class VectorDatabaseEngine implements AutoCloseable {
     public CollectionStats previewBackupCollection(String tenantId, String sourceCollectionName, String backupId, Path backupDirectory) {
         String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
         Objects.requireNonNull(sourceCollectionName, "sourceCollectionName");
-        Objects.requireNonNull(backupId, "backupId");
+        String normalizedBackupId = BackupIds.normalize(backupId);
         Objects.requireNonNull(backupDirectory, "backupDirectory");
 
-        CollectionPaths sourcePaths = CollectionPaths.of(backupDirectory.resolve(backupId), normalizedTenantId, sourceCollectionName);
+        CollectionPaths sourcePaths = CollectionPaths.of(backupDirectory.resolve(normalizedBackupId), normalizedTenantId, sourceCollectionName);
         if (!Files.exists(sourcePaths.metadataFile())) {
-            throw new NotFoundException("Backup not found: " + backupId + "/" + normalizedTenantId + "/" + sourceCollectionName);
+            throw new NotFoundException("Backup not found: " + normalizedBackupId + "/" + normalizedTenantId + "/" + sourceCollectionName);
         }
 
         try {
             return previewCollectionStats(sourcePaths, normalizedTenantId);
         } catch (IOException exception) {
             throw new UncheckedIOException(
-                    "Failed to inspect backup " + backupId + "/" + normalizedTenantId + "/" + sourceCollectionName,
+                    "Failed to inspect backup " + normalizedBackupId + "/" + normalizedTenantId + "/" + sourceCollectionName,
                     exception
             );
         }

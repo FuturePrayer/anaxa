@@ -76,7 +76,12 @@ public final class EnvironmentBenchmarkRunner {
                         config.rateLimitBurst(),
                         config.slowQueryThresholdMillis(),
                         runDirectory.resolve("audit").resolve("audit.log"),
-                        runDirectory.resolve("backups")
+                        runDirectory.resolve("backups"),
+                        0L,
+                        7,
+                        ServerConfig.DEFAULT_MAX_REQUEST_BODY_BYTES,
+                        ServerConfig.DEFAULT_MAX_CONCURRENT_REQUESTS,
+                        true
                 ));
                 embeddedServer.start();
                 baseUrl = "http://%s:%d".formatted(config.host(), embeddedServer.port());

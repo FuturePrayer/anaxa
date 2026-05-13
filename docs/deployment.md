@@ -32,8 +32,11 @@ anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar
 ```powershell
 java --enable-preview --add-modules jdk.incubator.vector `
   -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
-  --data-dir=D:\anaxa-data
+  --data-dir=D:\anaxa-data `
+  --allow-open-access=true
 ```
+
+> `--allow-open-access=true` 仅用于本地开发或内网临时验证。生产环境默认拒绝无鉴权启动，必须配置 `--api-keys` 或 `--api-key-file`。
 
 ### 3.2 推荐启动命令
 
@@ -50,6 +53,8 @@ java --enable-preview --add-modules jdk.incubator.vector `
   --api-key-file=D:\anaxa-config\api-keys.json `
   --rate-limit-per-minute=6000 `
   --rate-limit-burst=256 `
+  --max-request-body-bytes=268435456 `
+  --max-concurrent-requests=1024 `
   --slow-query-threshold-ms=250 `
   --audit-log=D:\anaxa-data\audit\audit.log `
   --backup-dir=D:\anaxa-data\backups `
@@ -71,11 +76,14 @@ java --enable-preview --add-modules jdk.incubator.vector `
 | `--api-key-file` | 空 | 可选 JSON 文件，支持 key / role / tenant policy 热重载 |
 | `--rate-limit-per-minute` | `6000` | 每分钟请求额度；`0` 表示关闭 |
 | `--rate-limit-burst` | `256` | 令牌桶突发容量 |
+| `--max-request-body-bytes` | `268435456` | 单个 HTTP request body 最大字节数；超限返回 413；`0` 表示关闭限制 |
+| `--max-concurrent-requests` | `1024` | 最大并发处理请求数；超限返回 503；`/health` 不占用该额度 |
 | `--slow-query-threshold-ms` | `250` | 慢查询阈值；`0` 表示关闭 |
 | `--audit-log` | `{data-dir}\audit\audit.log` | 审计日志路径 |
 | `--backup-dir` | `{data-dir}\backups` | 逻辑备份目录 |
 | `--snapshot-interval-seconds` | `0` | 自动 snapshot 周期；`0` 表示关闭 |
 | `--snapshot-retention-per-collection` | `7` | 每个 collection 自动 snapshot 保留份数 |
+| `--allow-open-access` | `false` | 是否允许无 API key 启动；生产必须保持 `false` |
 
 ## 5. 部署建议
 
@@ -106,10 +114,18 @@ java --enable-preview --add-modules jdk.incubator.vector `
 ### 5.4 备份与恢复建议
 
 - 自动 snapshot 适合做日常保底，手工 backup/snapshot 更适合发布、迁移、批量导入后的显式留档
+- `backupId` 只能使用 `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`，不要包含路径分隔符或相对路径
 - 备份前尽量确保 collection 没有待处理的 flush / compaction；自动 snapshot 会先执行一次 `flush`
 - 备份目录建议和数据目录分开
 - 恢复时目标 collection 名必须不存在
 - 如果开启自动 snapshot，建议把保留份数与磁盘容量一起做容量规划
+
+### 5.5 请求大小与过载保护
+
+- JSON、NDJSON 与 binary ingest 都受 `--max-request-body-bytes` 限制，超限返回 `413 Payload Too Large`
+- NDJSON / binary 是流式分批写入，超限前已经提交的批次不会自动回滚
+- `--max-concurrent-requests` 用于限制 HTTP 层并发处理数量，超限返回 `503` 并带 `Retry-After: 1`
+- 生产环境建议在反向代理层同时设置 TLS、连接超时、读超时、请求头大小和请求体大小限制
 
 ## 6. tenant / API key 文件示例
 

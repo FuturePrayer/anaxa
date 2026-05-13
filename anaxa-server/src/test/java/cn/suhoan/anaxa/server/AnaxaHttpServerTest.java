@@ -27,6 +27,7 @@ import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -36,7 +37,7 @@ class AnaxaHttpServerTest {
 
     @Test
     void servesCollectionAndSearchEndpoints() throws Exception {
-        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir, 96L))) {
+        try (AnaxaHttpServer server = new AnaxaHttpServer(ServerConfig.openAccess("127.0.0.1", 0, tempDir, 96L))) {
             server.start();
             HttpClient client = HttpClient.newHttpClient();
             String baseUrl = "http://127.0.0.1:" + server.port();
@@ -80,7 +81,7 @@ class AnaxaHttpServerTest {
 
     @Test
     void servesManualFlushEndpoint() throws Exception {
-        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-flush"), 1_000_000L))) {
+        try (AnaxaHttpServer server = new AnaxaHttpServer(ServerConfig.openAccess("127.0.0.1", 0, tempDir.resolve("http-flush"), 1_000_000L))) {
             server.start();
             HttpClient client = HttpClient.newHttpClient();
             String baseUrl = "http://127.0.0.1:" + server.port();
@@ -127,7 +128,7 @@ class AnaxaHttpServerTest {
 
     @Test
     void supportsNdjsonBulkIngestAndPartialPayloadUpdates() throws Exception {
-        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-ndjson"), 1_000_000L))) {
+        try (AnaxaHttpServer server = new AnaxaHttpServer(ServerConfig.openAccess("127.0.0.1", 0, tempDir.resolve("http-ndjson"), 1_000_000L))) {
             server.start();
             HttpClient client = HttpClient.newHttpClient();
             String baseUrl = "http://127.0.0.1:" + server.port();
@@ -329,7 +330,7 @@ class AnaxaHttpServerTest {
 
     @Test
     void servesDeleteAndCompactionEndpoints() throws Exception {
-        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig("127.0.0.1", 0, tempDir.resolve("http-delete"), 1L))) {
+        try (AnaxaHttpServer server = new AnaxaHttpServer(ServerConfig.openAccess("127.0.0.1", 0, tempDir.resolve("http-delete"), 1L))) {
             server.start();
             HttpClient client = HttpClient.newHttpClient();
             String baseUrl = "http://127.0.0.1:" + server.port();
@@ -431,6 +432,59 @@ class AnaxaHttpServerTest {
             assertEquals(200, metrics.statusCode());
             assertTrue(metrics.body().contains("anaxa_http_requests_total"));
             assertTrue(metrics.body().contains("anaxa_engine_collections 1"));
+        }
+    }
+
+    @Test
+    void rejectsOpenAccessUnlessExplicitlyAllowed() {
+        assertThrows(IllegalArgumentException.class, () -> new ServerConfig(
+                "127.0.0.1",
+                0,
+                tempDir.resolve("http-open-access-default"),
+                96L
+        ));
+
+        ServerConfig config = ServerConfig.openAccess(
+                "127.0.0.1",
+                0,
+                tempDir.resolve("http-open-access-explicit"),
+                96L
+        );
+        assertTrue(config.allowOpenAccess());
+    }
+
+    @Test
+    void rejectsOversizedRequestBodies() throws Exception {
+        Path dataDir = tempDir.resolve("http-body-limit");
+        try (AnaxaHttpServer server = new AnaxaHttpServer(new ServerConfig(
+                "127.0.0.1",
+                0,
+                dataDir,
+                1_000_000L,
+                Set.of("secret"),
+                null,
+                10_000,
+                100,
+                0L,
+                dataDir.resolve("audit").resolve("audit.log"),
+                dataDir.resolve("backups"),
+                0L,
+                7,
+                64L,
+                100
+        ))) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.port();
+
+            HttpResponse<String> oversized = sendJson(
+                    client,
+                    baseUrl + "/collections",
+                    "POST",
+                    Map.of("name", "docs", "dimension", 3, "metric", "COSINE", "flushThresholdBytes", 1_000_000),
+                    "secret"
+            );
+            assertEquals(413, oversized.statusCode());
         }
     }
 
@@ -730,14 +784,25 @@ class AnaxaHttpServerTest {
                     "tombstone flush or auto compaction did not complete"
             );
 
-            assertEquals(200, sendJson(
+            waitForCollectionStats(
                     client,
-                    baseUrl + "/collections/docs/compact",
-                    "POST",
-                    Map.of(),
+                    baseUrl,
+                    "docs",
                     "admin-key",
-                    "tenant-a"
-            ).statusCode());
+                    "tenant-a",
+                    stats -> !stats.flushInProgress() && !stats.compactionInProgress(),
+                    "collection did not become quiescent before manual compaction"
+            );
+            if (collectionStats(client, baseUrl, "docs", "admin-key", "tenant-a").segmentCount() >= 2) {
+                assertEquals(200, sendJson(
+                        client,
+                        baseUrl + "/collections/docs/compact",
+                        "POST",
+                        Map.of(),
+                        "admin-key",
+                        "tenant-a"
+                ).statusCode());
+            }
 
             HttpRequest metricsRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/metrics"))
                     .header("X-API-Key", "admin-key")
@@ -893,6 +958,24 @@ class AnaxaHttpServerTest {
                     "admin-key"
             );
             assertEquals(200, backup.statusCode());
+
+            HttpResponse<String> unsafeBackup = sendJson(
+                    client,
+                    baseUrl + "/collections/docs/backup",
+                    "POST",
+                    Map.of("backupId", "../outside"),
+                    "admin-key"
+            );
+            assertEquals(400, unsafeBackup.statusCode());
+
+            HttpResponse<String> unsafeRestore = sendJson(
+                    client,
+                    baseUrl + "/backups/evil.id/restore",
+                    "POST",
+                    Map.of("sourceCollection", "docs", "collectionName", "docs-unsafe"),
+                    "admin-key"
+            );
+            assertEquals(400, unsafeRestore.statusCode());
 
             HttpResponse<String> restore = sendJson(
                     client,

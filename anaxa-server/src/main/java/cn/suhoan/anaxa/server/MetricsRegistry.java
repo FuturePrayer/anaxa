@@ -66,6 +66,7 @@ final class MetricsRegistry implements EngineObserver {
     private final LongAdder authFailures = new LongAdder();
     private final LongAdder authorizationDenied = new LongAdder();
     private final LongAdder rateLimitedRequests = new LongAdder();
+    private final LongAdder overloadRejectedRequests = new LongAdder();
 
     void recordRequest(String method, String route, int statusCode, long durationNanos) {
         requestCounts.computeIfAbsent(new HttpMetricKey(method, route, statusCode), ignored -> new LongAdder()).increment();
@@ -93,6 +94,10 @@ final class MetricsRegistry implements EngineObserver {
 
     void recordRateLimited() {
         rateLimitedRequests.increment();
+    }
+
+    void recordOverloadRejected() {
+        overloadRejectedRequests.increment();
     }
 
     void recordSnapshot(String tenantId, String collectionName, long durationNanos, boolean success, boolean automatic) {
@@ -251,6 +256,8 @@ final class MetricsRegistry implements EngineObserver {
         builder.append("anaxa_http_authorization_denied_total ").append(authorizationDenied.sum()).append('\n');
         builder.append("# TYPE anaxa_http_rate_limited_total counter\n");
         builder.append("anaxa_http_rate_limited_total ").append(rateLimitedRequests.sum()).append('\n');
+        builder.append("# TYPE anaxa_http_overload_rejections_total counter\n");
+        builder.append("anaxa_http_overload_rejections_total ").append(overloadRejectedRequests.sum()).append('\n');
 
         appendCollectionCounters(builder, "anaxa_search_queries_total", searchQueries, collectionFilter);
         appendCollectionCounters(builder, "anaxa_search_slow_queries_total", searchSlowQueries, collectionFilter);

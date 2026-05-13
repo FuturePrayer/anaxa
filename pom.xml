@@ -6,7 +6,7 @@
 
     <groupId>cn.suhoan</groupId>
     <artifactId>anaxa</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0</version>
     <packaging>pom</packaging>
     <name>AnaxaDB</name>
 
