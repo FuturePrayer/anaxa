@@ -1,83 +1,163 @@
 # AnaxaDB
 
-AnaxaDB 是一个基于 **JDK 26** 的独立式向量数据库实现，当前已经具备可运行的单机服务形态，支持多租户、WAL/Segment 恢复、HNSW+PQ 检索、Prometheus 指标、审计日志、备份恢复，以及面向知识库场景的 **NDJSON 批量写入**、**payload-only partial update** 和 **delete/update 压力下的自适应 flush/compaction**。同时，仓库也提供了一个 **基于 JDK 25、无预览特性、直接使用 JDK HttpClient 的 Java SDK**，方便业务侧直接接入。
+[English](README.en.md) | [简体中文](README.md)
 
-## 文档导航
+AnaxaDB 是一个基于现代 Java 构建的独立式向量数据库。它提供单机 HTTP 服务、Java SDK、HNSW+PQ 向量检索、多租户操作、WAL/Segment 恢复、备份恢复、Prometheus 指标、审计日志，以及用于本地测试的内置 Web UI。
 
-| 文档 | 内容 |
-| --- | --- |
-| [docs/overview.md](docs/overview.md) | 当前系统架构、模块划分、写入/检索/删改生命周期、功能简述 |
-| [docs/deployment.md](docs/deployment.md) | 环境要求、构建打包、启动参数、部署与运维建议 |
-| [docs/http-api.md](docs/http-api.md) | HTTP 接口文档、鉴权/租户头、请求与响应格式、错误码 |
-| [docs/usage.md](docs/usage.md) | 常用操作示例，包括 JSON/NDJSON 写入、PATCH partial update、搜索、删除、备份恢复 |
-| [docs/sdk.md](docs/sdk.md) | Java SDK 依赖方式、基础 API、高阶流程 API 与代码示例 |
-| [docs/benchmark.md](docs/benchmark.md) | Python 压测脚本、Java benchmark 模块、benchmark 报告字段说明 |
-| [docs/roadmap.md](docs/roadmap.md) | 当前实现与架构愿景的差距、已完成项、后续演进建议 |
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
+[![Java](https://img.shields.io/badge/java-26-orange.svg)](pom.xml)
+
+## 特性
+
+- 基于 HNSW+PQ 的近似向量检索，支持 cosine、dot-product 和 L2 打分。
+- 支持 JSON 和 `application/x-ndjson` 批量写入，适合大规模文档导入。
+- 支持 payload 过滤，包括倒排索引和列式范围索引。
+- 支持通过 `PATCH /collections/{name}/vectors` 做 payload-only 局部更新。
+- 基于 tombstone 的删除机制，并针对高频更新/删除场景提供自适应 flush 和 compaction。
+- 基于 WAL 和 immutable segment 的本地持久化恢复。
+- 支持多租户 API、API Key、RBAC、配额、限流、审计日志和指标。
+- 支持备份恢复，并校验 backup identifier。
+- 内置 Web UI，访问路径为 `/ui`，可通过 `--web-ui-enabled=false` 关闭。
+- Java SDK 不依赖预览特性，适合业务侧集成。
+
+## 项目状态
+
+AnaxaDB 当前是单机数据库，适合本地开发、实验、benchmark，以及需要简单运维模型的嵌入式或单节点部署场景。
+
+服务端当前需要 JDK 26 和 `--enable-preview`，因为仍使用部分 Java 预览 API。SDK 面向 JDK 25，不需要启用预览特性。
 
 ## 快速开始
 
-1. 构建
+### 构建
 
-   ```powershell
-   $env:JAVA_HOME='D:\devProgram\jdk\jdk-26'
-   mvn "-Dmaven.repo.local=D:\jarLibrary" clean package
-   ```
+```bash
+mvn clean package
+```
 
-2. 启动服务
+### 启动服务
 
-   ```powershell
-    java --enable-preview `
-      -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
-      --data-dir=D:\anaxa-data `
-      --allow-open-access=true
-    ```
+```bash
+java --enable-preview \
+  -jar anaxa-server/target/anaxa-server-1.0.jar \
+  --data-dir=./anaxa-data \
+  --allow-open-access=true
+```
 
-   `--allow-open-access=true` 仅用于本地快速体验；生产环境必须配置 `--api-keys` 或 `--api-key-file`。
+`--allow-open-access=true` 仅适合本地测试。共享环境或生产环境请使用 `--api-keys` 或 `--api-key-file` 配置鉴权。
 
-3. 创建集合
+### 打开 Web UI
 
-   ```bash
-   curl -X POST "http://127.0.0.1:8080/collections" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "name": "docs",
-       "dimension": 768,
-       "metric": "COSINE"
-     }'
-   ```
+访问：
 
-4. 批量导入后切读流量时，建议执行一次 flush
+```text
+http://127.0.0.1:8080/ui
+```
 
-   ```bash
-   curl -X POST "http://127.0.0.1:8080/collections/docs/flush"
-   ```
+### 创建集合
 
-## 当前重点能力
+```bash
+curl -X POST "http://127.0.0.1:8080/collections" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "docs",
+    "dimension": 768,
+    "metric": "COSINE"
+  }'
+```
 
-- JSON 包装批量写入 + `application/x-ndjson` 流式批量写入
-- `PATCH /collections/{name}/vectors` 做 metadata/payload 局部更新，不要求客户端重传向量
-- delete/tombstone + update-heavy / delete-heavy 自适应 flush/compaction
-- HNSW+PQ 近似检索，支持 payload 倒排和列式范围过滤
-- collection query cache + source index cache + Segment prefetch / resident warmup
-- API Key / RBAC / tenant 配额 / rate limiting / audit / backup-restore
-- 内置 WebUI 测试控制台：`/ui`，可通过 `--web-ui-enabled=false` 关闭
+### 写入向量
 
-## Maven 模块
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vectors": [
+      {
+        "id": "doc-1",
+        "values": [0.1, 0.2, 0.3],
+        "payload": {"title": "Example"}
+      }
+    ]
+  }'
+```
 
-| 模块 | 作用 |
+向量维度必须与集合维度一致。上面的短向量仅用于展示请求结构。
+
+### 检索
+
+```bash
+curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vector": [0.1, 0.2, 0.3],
+    "topK": 10
+  }'
+```
+
+## 安装
+
+可以从 GitHub Releases 下载发布产物：
+
+- `anaxa-server-<version>.jar`：可运行的 HTTP 服务。
+- `anaxa-benchmark-<version>.jar`：benchmark 运行器。
+- `anaxa-sdk-<version>.jar`：Java SDK 类库。
+- `anaxa-<version>-checksums.sha256`：发布产物的 SHA-256 校验文件。
+
+## Java SDK
+
+SDK 模块基于 JDK `HttpClient` 封装 HTTP API，提供底层 API 调用和更高层的写入辅助流程。
+
+```xml
+<dependency>
+  <groupId>cn.suhoan</groupId>
+  <artifactId>anaxa-sdk</artifactId>
+  <version>1.0</version>
+</dependency>
+```
+
+更多客户端配置和示例见 [docs/sdk.md](docs/sdk.md)。
+
+## 模块
+
+| 模块 | 说明 |
 | --- | --- |
-| `anaxa-common` | 通用模型、错误定义、JSON 工具、上下文与工具类 |
-| `anaxa-sdk` | 基于 JDK 25 的 Java SDK，封装 HttpClient、基础 REST API 与高阶写入/同步流程 |
-| `anaxa-index` | HNSW+PQ 搜索器、SIMD 打分、Payload 过滤索引、Top-K 归并 |
-| `anaxa-storage` | WAL、堆外 MemTable、Immutable Segment、恢复与校验 |
-| `anaxa-engine` | collection 生命周期、检索编排、flush/compaction、partial update |
-| `anaxa-server` | HTTP 服务、鉴权、租户、配额、指标、审计、备份恢复 |
-| `anaxa-benchmark` | 环境 benchmark 与 stdout 报告 |
+| `anaxa-common` | 通用模型、错误定义、JSON 支持、上下文和工具类。 |
+| `anaxa-sdk` | 基于 JDK `HttpClient` 的 Java SDK。 |
+| `anaxa-index` | HNSW+PQ 搜索、向量打分、payload 索引和 top-k 归并。 |
+| `anaxa-storage` | WAL、堆外 MemTable、immutable segment、恢复和校验。 |
+| `anaxa-engine` | Collection 生命周期、读写编排、flush、compaction 和更新。 |
+| `anaxa-server` | HTTP 服务、鉴权、租户、配额、指标、审计、备份和 Web UI。 |
+| `anaxa-benchmark` | Java benchmark 运行器和报告生成。 |
 
-## 知识库场景建议
+## 文档
 
-- **首批导入**：优先用 NDJSON 或大批次 JSON 写入。
-- **导入完成后**：执行一次 `flush`，把 MemTable 落盘并准备读路径。
-- **正文变化**：走完整 upsert，提交新向量。
-- **只改标题/标签/path/权限元数据**：走 `PATCH /collections/{name}/vectors`。
-- **删除/高频修改**：让系统自动 flush/compact；手动 compact 更适合离峰维护窗口。
+| 文档 | 说明 |
+| --- | --- |
+| [docs/overview.md](docs/overview.md) | 架构、模块和数据生命周期。 |
+| [docs/deployment.md](docs/deployment.md) | 运行时要求、打包、启动参数和运维建议。 |
+| [docs/http-api.md](docs/http-api.md) | HTTP API、请求头、payload 和错误说明。 |
+| [docs/usage.md](docs/usage.md) | 写入、检索、更新、删除、备份和恢复等常见流程。 |
+| [docs/sdk.md](docs/sdk.md) | Java SDK 配置和示例。 |
+| [docs/benchmark.md](docs/benchmark.md) | Benchmark profile、脚本和报告字段。 |
+| [docs/roadmap.md](docs/roadmap.md) | 当前限制和后续规划。 |
+
+## Benchmark
+
+```bash
+java --enable-preview \
+  -jar anaxa-benchmark/target/anaxa-benchmark-1.0.jar \
+  --profile=quick
+```
+
+可用 profile 和推荐测试环境见 [docs/benchmark.md](docs/benchmark.md)。
+
+## 安全说明
+
+- 默认不允许无鉴权开放访问。
+- 认证部署请配置 `--api-keys` 或 `--api-key-file`。
+- `--allow-open-access=true` 只应在本地开发环境使用。
+- 安全敏感环境可以通过 `--web-ui-enabled=false` 关闭 Web UI。
+
+## License
+
+AnaxaDB 使用 [Apache License 2.0](LICENSE.txt) 许可证。

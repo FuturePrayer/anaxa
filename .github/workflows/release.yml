@@ -114,21 +114,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > release-notes.md <<EOF
-          ## AnaxaDB ${{ steps.release.outputs.version }}
+          cat > release-notes.md <<'EOF'
+          ## AnaxaDB __VERSION__
 
-          Release branch: `${{ steps.release.outputs.release_branch }}`
+          Release branch: `__RELEASE_BRANCH__`
 
-          Release type: `${{ steps.release.outputs.release_type }}`
+          Release type: `__RELEASE_TYPE__`
 
-          Build JDK: `${{ steps.release.outputs.jdk_version }}`
+          Build JDK: `__JDK_VERSION__`
 
           Published artifacts:
-          - `anaxa-server-${{ steps.release.outputs.version }}.jar`
-          - `anaxa-benchmark-${{ steps.release.outputs.version }}.jar`
-          - `anaxa-sdk-${{ steps.release.outputs.version }}.jar`
-          - `anaxa-${{ steps.release.outputs.version }}-checksums.sha256`
+          - `anaxa-server-__VERSION__.jar`
+          - `anaxa-benchmark-__VERSION__.jar`
+          - `anaxa-sdk-__VERSION__.jar`
+          - `anaxa-__VERSION__-checksums.sha256`
           EOF
+          sed -i \
+            -e 's/__VERSION__/${{ steps.release.outputs.version }}/g' \
+            -e 's/__RELEASE_BRANCH__/${{ steps.release.outputs.release_branch }}/g' \
+            -e 's/__RELEASE_TYPE__/${{ steps.release.outputs.release_type }}/g' \
+            -e 's/__JDK_VERSION__/${{ steps.release.outputs.jdk_version }}/g' \
+            release-notes.md
 
       - name: Publish GitHub release
         if: steps.release.outputs.publish == 'true'
@@ -138,6 +144,7 @@ jobs:
           name: AnaxaDB ${{ steps.release.outputs.version }}
           body_path: release-notes.md
           prerelease: ${{ steps.release.outputs.prerelease }}
+          overwrite_files: true
           fail_on_unmatched_files: true
           files: |
             release-artifacts/anaxa-server-${{ steps.release.outputs.version }}.jar
