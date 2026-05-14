@@ -1,11 +1,12 @@
 # AnaxaDB
 
-[English](README.en.md) | [简体中文](README.md)
+简体中文 | [English](README.en.md)
 
 AnaxaDB 是一个基于现代 Java 构建的独立式向量数据库。它提供单机 HTTP 服务、Java SDK、HNSW+PQ 向量检索、多租户操作、WAL/Segment 恢复、备份恢复、Prometheus 指标、审计日志，以及用于本地测试的内置 Web UI。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 [![Java](https://img.shields.io/badge/java-26-orange.svg)](pom.xml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/FuturePrayer/anaxa)
 
 ## 特性
 
@@ -111,7 +112,7 @@ SDK 模块基于 JDK `HttpClient` 封装 HTTP API，提供底层 API 调用和�
 <dependency>
   <groupId>cn.suhoan</groupId>
   <artifactId>anaxa-sdk</artifactId>
-  <version>1.2</version>
+  <version>1.3</version>
 </dependency>
 ```
 

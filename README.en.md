@@ -1,11 +1,12 @@
 # AnaxaDB
 
-[English](README.en.md) | [简体中文](README.md)
+[简体中文](README.md) | English
 
 AnaxaDB is a standalone vector database built on modern Java. It provides a single-node HTTP server, a Java SDK, HNSW+PQ vector search, tenant-aware operations, WAL/segment recovery, backup and restore, Prometheus metrics, audit logs, and a built-in Web UI for local testing.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 [![Java](https://img.shields.io/badge/java-26-orange.svg)](pom.xml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/FuturePrayer/anaxa)
 
 ## Features
 
@@ -111,7 +112,7 @@ The SDK module wraps the HTTP API with JDK `HttpClient` and provides low-level A
 <dependency>
   <groupId>cn.suhoan</groupId>
   <artifactId>anaxa-sdk</artifactId>
-  <version>1.2</version>
+  <version>1.3</version>
 </dependency>
 ```
 
