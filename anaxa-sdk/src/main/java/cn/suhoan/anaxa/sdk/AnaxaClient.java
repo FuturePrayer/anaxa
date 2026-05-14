@@ -79,6 +79,8 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 创建一个新的 Builder。
+     *
+     * @return SDK builder
      */
     public static Builder builder() {
         return new Builder();
@@ -89,6 +91,9 @@ public final class AnaxaClient implements AutoCloseable {
      *
      * <p>常见用途是：全局 admin key 先创建一个无 tenant 作用域的客户端，
      * 然后在实际调用前通过这个方法切换到某个具体 tenant。
+     *
+     * @param tenantId tenant id to bind, or null to clear it
+     * @return derived client bound to the tenant
      */
     public AnaxaClient withTenant(String tenantId) {
         return new AnaxaClient(httpClient, baseUri, apiKey, tenantId, requestTimeout, defaultHeaders);
@@ -96,6 +101,8 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 返回一个不携带默认 tenant 头的新客户端。
+     *
+     * @return derived client without a default tenant
      */
     public AnaxaClient withoutTenant() {
         return withTenant(null);
@@ -103,6 +110,9 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 基于当前配置派生一个新的 API Key。
+     *
+     * @param newApiKey API key to bind, or null to clear it
+     * @return derived client bound to the API key
      */
     public AnaxaClient withApiKey(String newApiKey) {
         return new AnaxaClient(httpClient, baseUri, newApiKey, defaultTenantId, requestTimeout, defaultHeaders);
@@ -110,6 +120,9 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 获取某个 collection 的绑定客户端。
+     *
+     * @param collectionName collection name
+     * @return collection-scoped client
      */
     public AnaxaCollectionClient collection(String collectionName) {
         return new AnaxaCollectionClient(this, collectionName);
@@ -117,6 +130,10 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 调用 {@code GET /health}。
+     *
+     * @return health response
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public HealthResponse health() throws IOException, InterruptedException {
         return sendJson("GET", path("health"), null, HealthResponse.class);
@@ -124,6 +141,10 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 调用 {@code GET /metrics}，返回 Prometheus 文本格式。
+     *
+     * @return Prometheus metrics text
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public String metrics() throws IOException, InterruptedException {
         return sendText("GET", path("metrics"));
@@ -131,6 +152,10 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 列出当前 tenant 作用域下可见的 collection。
+     *
+     * @return visible collections
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public List<CollectionStats> listCollections() throws IOException, InterruptedException {
         return sendJson("GET", path("collections"), null, COLLECTION_STATS_LIST);
@@ -138,6 +163,11 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 创建 collection。
+     *
+     * @param request create-collection request
+     * @return created collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats createCollection(CreateCollectionRequest request) throws IOException, InterruptedException {
         return sendJson("POST", path("collections"), Objects.requireNonNull(request, "request"), CollectionStats.class);
@@ -145,6 +175,11 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 查询指定 collection 的统计信息。
+     *
+     * @param collectionName collection name
+     * @return collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats getCollection(String collectionName) throws IOException, InterruptedException {
         return sendJson("GET", path("collections", collectionName), null, CollectionStats.class);
@@ -152,6 +187,10 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 列出当前 tenant 或全局视图下的 tenant 运维信息。
+     *
+     * @return tenant statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public List<TenantStats> listTenants() throws IOException, InterruptedException {
         return sendJson("GET", path("tenants"), null, TENANT_STATS_LIST);
@@ -159,6 +198,11 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 查询单个 tenant 的运维信息。
+     *
+     * @param tenantId tenant id
+     * @return tenant statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public TenantStats getTenant(String tenantId) throws IOException, InterruptedException {
         return sendJson("GET", path("tenants", tenantId), null, TenantStats.class);
@@ -166,6 +210,10 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 查看当前 tenant 或全局视图下的备份列表。
+     *
+     * @return backup summaries
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public List<BackupSummary> listBackups() throws IOException, InterruptedException {
         return sendJson("GET", path("backups"), null, BACKUP_SUMMARY_LIST);
@@ -173,6 +221,11 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 对整个 tenant 执行一次手工 snapshot，并由服务端生成 backupId。
+     *
+     * @param tenantId tenant id
+     * @return snapshot result
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public TenantSnapshotResult snapshotTenant(String tenantId) throws IOException, InterruptedException {
         return sendJson("POST", path("tenants", tenantId, "snapshot"), null, TenantSnapshotResult.class);
@@ -180,6 +233,12 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 对整个 tenant 执行一次手工 snapshot，并显式指定 backupId。
+     *
+     * @param tenantId tenant id
+     * @param backupId backup id to create
+     * @return snapshot result
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public TenantSnapshotResult snapshotTenant(String tenantId, String backupId) throws IOException, InterruptedException {
         return sendJson(
@@ -192,6 +251,8 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 当前客户端绑定的默认 tenant。
+     *
+     * @return default tenant id, when configured
      */
     public Optional<String> defaultTenantId() {
         return Optional.ofNullable(defaultTenantId);
@@ -199,6 +260,8 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 当前客户端绑定的基础地址。
+     *
+     * @return server base URI
      */
     public URI baseUri() {
         return baseUri;
@@ -206,6 +269,8 @@ public final class AnaxaClient implements AutoCloseable {
 
     /**
      * 当前客户端复用的底层 {@link HttpClient}。
+     *
+     * @return underlying HTTP client
      */
     public HttpClient httpClient() {
         return httpClient;
@@ -452,11 +517,20 @@ public final class AnaxaClient implements AutoCloseable {
 
         /**
          * 设置服务端基础地址，例如 {@code http://127.0.0.1:8080}。
+         *
+         * @param newBaseUri server base URI string
+         * @return this builder
          */
         public Builder baseUri(String newBaseUri) {
             return baseUri(URI.create(Objects.requireNonNull(newBaseUri, "newBaseUri")));
         }
 
+        /**
+         * 设置服务端基础地址。
+         *
+         * @param newBaseUri server base URI
+         * @return this builder
+         */
         public Builder baseUri(URI newBaseUri) {
             this.baseUri = newBaseUri;
             return this;
@@ -466,6 +540,9 @@ public final class AnaxaClient implements AutoCloseable {
          * 设置默认 API Key。
          *
          * <p>如果服务端运行在 open mode，这个字段可以不传。
+         *
+         * @param newApiKey default API key
+         * @return this builder
          */
         public Builder apiKey(String newApiKey) {
             this.apiKey = newApiKey;
@@ -474,6 +551,9 @@ public final class AnaxaClient implements AutoCloseable {
 
         /**
          * 设置默认 tenant。
+         *
+         * @param tenantId default tenant id
+         * @return this builder
          */
         public Builder defaultTenantId(String tenantId) {
             this.defaultTenantId = tenantId;
@@ -482,6 +562,9 @@ public final class AnaxaClient implements AutoCloseable {
 
         /**
          * 设置每个请求的默认超时时间。
+         *
+         * @param timeout request timeout
+         * @return this builder
          */
         public Builder requestTimeout(Duration timeout) {
             this.requestTimeout = timeout;
@@ -493,6 +576,9 @@ public final class AnaxaClient implements AutoCloseable {
          *
          * <p>如果调用方显式传入了自定义 {@link #httpClient(HttpClient)}，
          * 这里的值不会再参与构建。
+         *
+         * @param timeout connection timeout
+         * @return this builder
          */
         public Builder connectTimeout(Duration timeout) {
             this.connectTimeout = timeout;
@@ -501,6 +587,9 @@ public final class AnaxaClient implements AutoCloseable {
 
         /**
          * 允许业务方自行传入一个已经配置好的 {@link HttpClient}。
+         *
+         * @param newHttpClient HTTP client to reuse
+         * @return this builder
          */
         public Builder httpClient(HttpClient newHttpClient) {
             this.httpClient = newHttpClient;
@@ -509,6 +598,10 @@ public final class AnaxaClient implements AutoCloseable {
 
         /**
          * 添加一个所有请求都会透传的自定义请求头。
+         *
+         * @param name header name
+         * @param value header value
+         * @return this builder
          */
         public Builder defaultHeader(String name, String value) {
             String normalizedName = Objects.requireNonNull(name, "name").trim();
@@ -525,6 +618,8 @@ public final class AnaxaClient implements AutoCloseable {
 
         /**
          * 构建客户端。
+         *
+         * @return configured SDK client
          */
         public AnaxaClient build() {
             HttpClient resolvedHttpClient = httpClient;

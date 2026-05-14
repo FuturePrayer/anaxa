@@ -22,6 +22,8 @@ public final class PayloadFilterBuilder {
 
     /**
      * 创建一个新的过滤构建器。
+     *
+     * @return new filter builder
      */
     public static PayloadFilterBuilder filter() {
         return new PayloadFilterBuilder();
@@ -29,6 +31,10 @@ public final class PayloadFilterBuilder {
 
     /**
      * 添加一个精确匹配条件，例如 {@code tenant = "team-a"}。
+     *
+     * @param field payload field name
+     * @param value value to match
+     * @return this builder
      */
     public PayloadFilterBuilder eq(String field, Object value) {
         clauses.add(singleFieldClause(field, value));
@@ -37,6 +43,10 @@ public final class PayloadFilterBuilder {
 
     /**
      * 添加一个 {@code $in} 条件。
+     *
+     * @param field payload field name
+     * @param values accepted values
+     * @return this builder
      */
     public PayloadFilterBuilder in(String field, Collection<?> values) {
         Objects.requireNonNull(values, "values");
@@ -53,6 +63,10 @@ public final class PayloadFilterBuilder {
      * 添加一个 {@code $contains} 条件。
      *
      * <p>适合标签数组、关键词数组等“集合包含某值”的过滤。
+     *
+     * @param field payload field name
+     * @param value value that must be contained
+     * @return this builder
      */
     public PayloadFilterBuilder contains(String field, Object value) {
         LinkedHashMap<String, Object> expression = new LinkedHashMap<>();
@@ -65,6 +79,13 @@ public final class PayloadFilterBuilder {
      * 添加范围条件。
      *
      * <p>四个参数只要提供至少一个即可；未提供的边界不会写入最终表达式。
+     *
+     * @param field payload field name
+     * @param gt exclusive lower bound
+     * @param gte inclusive lower bound
+     * @param lt exclusive upper bound
+     * @param lte inclusive upper bound
+     * @return this builder
      */
     public PayloadFilterBuilder range(String field, Object gt, Object gte, Object lt, Object lte) {
         LinkedHashMap<String, Object> expression = new LinkedHashMap<>();
@@ -91,6 +112,9 @@ public final class PayloadFilterBuilder {
      * 直接附加一段原始过滤子句。
      *
      * <p>当 SDK 尚未提供某个便捷方法时，可以先通过这个入口透传自定义结构。
+     *
+     * @param clause raw filter clause
+     * @return this builder
      */
     public PayloadFilterBuilder raw(Map<String, Object> clause) {
         if (clause == null || clause.isEmpty()) {
@@ -102,6 +126,9 @@ public final class PayloadFilterBuilder {
 
     /**
      * 添加一个 {@code $and} 复合子句。
+     *
+     * @param builders child filter builders
+     * @return this builder
      */
     public PayloadFilterBuilder and(PayloadFilterBuilder... builders) {
         clauses.add(logicalClause("$and", builders));
@@ -110,6 +137,9 @@ public final class PayloadFilterBuilder {
 
     /**
      * 添加一个 {@code $or} 复合子句。
+     *
+     * @param builders child filter builders
+     * @return this builder
      */
     public PayloadFilterBuilder or(PayloadFilterBuilder... builders) {
         clauses.add(logicalClause("$or", builders));
@@ -118,6 +148,9 @@ public final class PayloadFilterBuilder {
 
     /**
      * 添加一个 {@code $not} 子句。
+     *
+     * @param builder child filter builder to negate
+     * @return this builder
      */
     public PayloadFilterBuilder not(PayloadFilterBuilder builder) {
         Objects.requireNonNull(builder, "builder");
@@ -132,6 +165,8 @@ public final class PayloadFilterBuilder {
      * 构建最终的过滤表达式。
      *
      * <p>如果没有任何条件，会返回空 Map；这样可以直接交给 {@code SearchRequest} 使用。
+     *
+     * @return immutable payload filter map
      */
     public Map<String, Object> build() {
         if (clauses.isEmpty()) {

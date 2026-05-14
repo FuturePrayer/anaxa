@@ -7,11 +7,15 @@
     <parent>
         <groupId>cn.suhoan</groupId>
         <artifactId>anaxa</artifactId>
-        <version>1.1</version>
+        <version>1.2</version>
     </parent>
 
     <artifactId>anaxa-server</artifactId>
     <name>AnaxaDB Server</name>
+
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
 
     <dependencies>
         <dependency>

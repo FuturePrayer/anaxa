@@ -14,6 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.function.Consumer;
 
+/**
+ * Encoder and decoder for AnaxaDB binary vector batch payloads.
+ */
 public final class BinaryVectorStreams {
     private static final int MAGIC = 0x41584231;
     private static final int VERSION = 1;
@@ -21,6 +24,14 @@ public final class BinaryVectorStreams {
     private BinaryVectorStreams() {
     }
 
+    /**
+     * Reads a binary vector batch and sends each vector to a consumer.
+     *
+     * @param input binary batch input stream
+     * @param expectedDimension expected vector dimension
+     * @param consumer receiver for decoded vectors
+     * @return number of decoded records
+     */
     public static long readBatch(InputStream input, int expectedDimension, Consumer<UpsertVector> consumer) {
         if (expectedDimension <= 0) {
             throw new IllegalArgumentException("expectedDimension must be positive");
@@ -90,6 +101,13 @@ public final class BinaryVectorStreams {
         }
     }
 
+    /**
+     * Writes vectors into the AnaxaDB binary batch format.
+     *
+     * @param dimension expected vector dimension
+     * @param vectors vectors to encode
+     * @return encoded binary batch bytes
+     */
     public static byte[] writeBatch(int dimension, Iterable<UpsertVector> vectors) {
         if (dimension <= 0) {
             throw new IllegalArgumentException("dimension must be positive");

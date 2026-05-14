@@ -2,6 +2,23 @@ package cn.suhoan.anaxa.common.model;
 
 import java.time.Instant;
 
+/**
+ * Aggregated statistics and limits for a tenant.
+ *
+ * @param tenantId tenant id
+ * @param collectionCount number of collections
+ * @param liveVectorCount number of live vectors
+ * @param tombstoneCount number of deleted vector markers
+ * @param segmentCount number of immutable segments
+ * @param storageBytes estimated storage bytes used by this tenant
+ * @param maxCollections optional collection limit
+ * @param maxLiveVectors optional live vector limit
+ * @param maxStorageBytes optional storage byte limit
+ * @param rateLimitPerMinute optional per-minute request limit
+ * @param rateLimitBurst optional burst request limit
+ * @param backupCount number of tenant backups
+ * @param lastSnapshotAt timestamp of the latest snapshot, when available
+ */
 public record TenantStats(
         String tenantId,
         int collectionCount,
@@ -17,6 +34,9 @@ public record TenantStats(
         int backupCount,
         Instant lastSnapshotAt
 ) {
+    /**
+     * Creates tenant statistics.
+     */
     public TenantStats {
         tenantId = CollectionDefinition.normalizeTenantId(tenantId);
         if (collectionCount < 0) {

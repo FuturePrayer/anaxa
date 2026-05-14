@@ -13,6 +13,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.function.Consumer;
 
+/**
+ * Shared JSON serialization helpers used by AnaxaDB modules and the SDK.
+ */
 public final class JsonSupport {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
@@ -21,10 +24,21 @@ public final class JsonSupport {
     private JsonSupport() {
     }
 
+    /**
+     * Returns the shared Jackson mapper instance.
+     *
+     * @return shared object mapper
+     */
     public static ObjectMapper mapper() {
         return MAPPER;
     }
 
+    /**
+     * Serializes a value to UTF-8 JSON bytes.
+     *
+     * @param value value to serialize, or an empty object when null
+     * @return serialized JSON bytes
+     */
     public static byte[] writeBytes(Object value) {
         try {
             return MAPPER.writeValueAsBytes(value == null ? Map.of() : value);
@@ -33,6 +47,12 @@ public final class JsonSupport {
         }
     }
 
+    /**
+     * Serializes a value to a JSON string.
+     *
+     * @param value value to serialize, or an empty object when null
+     * @return serialized JSON string
+     */
     public static String writeString(Object value) {
         try {
             return MAPPER.writeValueAsString(value == null ? Map.of() : value);
@@ -41,6 +61,14 @@ public final class JsonSupport {
         }
     }
 
+    /**
+     * Deserializes JSON bytes into a Java type.
+     *
+     * @param bytes JSON bytes
+     * @param type target type
+     * @param <T> target type
+     * @return deserialized value
+     */
     public static <T> T read(byte[] bytes, Class<T> type) {
         try {
             return MAPPER.readValue(bytes, type);
@@ -49,6 +77,14 @@ public final class JsonSupport {
         }
     }
 
+    /**
+     * Deserializes a JSON stream into a Java type.
+     *
+     * @param input JSON input stream
+     * @param type target type
+     * @param <T> target type
+     * @return deserialized value
+     */
     public static <T> T read(InputStream input, Class<T> type) {
         try {
             return MAPPER.readValue(input, type);
@@ -57,6 +93,14 @@ public final class JsonSupport {
         }
     }
 
+    /**
+     * Reads newline-delimited JSON values from a stream.
+     *
+     * @param input NDJSON input stream
+     * @param type target item type
+     * @param consumer receiver for each decoded item
+     * @param <T> target item type
+     */
     public static <T> void readNdjson(InputStream input, Class<T> type, Consumer<T> consumer) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
             String line;
@@ -79,6 +123,12 @@ public final class JsonSupport {
         }
     }
 
+    /**
+     * Deserializes JSON bytes into a string-keyed map.
+     *
+     * @param bytes JSON bytes, or empty bytes for an empty map
+     * @return deserialized payload map
+     */
     public static Map<String, Object> readMap(byte[] bytes) {
         if (bytes == null || bytes.length == 0) {
             return Map.of();
@@ -90,6 +140,12 @@ public final class JsonSupport {
         }
     }
 
+    /**
+     * Estimates the number of bytes needed to encode a value as JSON.
+     *
+     * @param value value to estimate
+     * @return estimated JSON byte size
+     */
     public static int estimateBytes(Object value) {
         return estimateValueBytes(value == null ? Map.of() : value);
     }

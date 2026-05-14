@@ -7,10 +7,20 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
+/**
+ * Utility for applying payload-only merge patches.
+ */
 public final class PayloadPatches {
     private PayloadPatches() {
     }
 
+    /**
+     * Merges a payload patch into an existing payload.
+     *
+     * @param base existing payload
+     * @param patch payload patch; null values remove keys
+     * @return immutable merged payload
+     */
     public static Map<String, Object> merge(Map<String, Object> base, Map<String, Object> patch) {
         LinkedHashMap<String, Object> merged = deepMutableMap(base == null ? Map.of() : base);
         applyPatch(merged, patch == null ? Map.of() : patch);

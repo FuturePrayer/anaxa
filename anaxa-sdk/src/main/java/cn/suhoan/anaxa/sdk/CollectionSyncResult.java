@@ -7,6 +7,18 @@ import java.util.Objects;
 
 /**
  * 一次“文档同步流程”执行完后的结果。
+ *
+ * @param collectionName collection name
+ * @param upsertsApplied number of upserted vectors
+ * @param partialUpdatesApplied number of partial updates applied
+ * @param deletionsApplied number of deletions applied
+ * @param upsertBatchesSent number of upsert batches sent
+ * @param partialUpdateBatchesSent number of partial update batches sent
+ * @param deletionBatchesSent number of deletion batches sent
+ * @param flushed whether a flush was performed
+ * @param compacted whether compaction was performed
+ * @param elapsed elapsed time
+ * @param finalStats final collection statistics
  */
 public record CollectionSyncResult(
         String collectionName,
@@ -21,6 +33,9 @@ public record CollectionSyncResult(
         Duration elapsed,
         CollectionStats finalStats
 ) {
+    /**
+     * Creates a collection sync result.
+     */
     public CollectionSyncResult {
         collectionName = Objects.requireNonNull(collectionName, "collectionName").trim();
         elapsed = Objects.requireNonNull(elapsed, "elapsed");

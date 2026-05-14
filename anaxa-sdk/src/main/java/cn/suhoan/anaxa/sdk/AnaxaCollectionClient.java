@@ -47,6 +47,8 @@ public final class AnaxaCollectionClient {
 
     /**
      * 当前绑定的 collection 名。
+     *
+     * @return bound collection name
      */
     public String name() {
         return collectionName;
@@ -54,6 +56,10 @@ public final class AnaxaCollectionClient {
 
     /**
      * 查询 collection 统计信息。
+     *
+     * @return collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats stats() throws IOException, InterruptedException {
         return client.getCollection(collectionName);
@@ -64,6 +70,11 @@ public final class AnaxaCollectionClient {
      *
      * <p>请求里的 {@code name} 必须与当前绑定的 collection 一致，
      * 这样可以避免“对象名是 docs，请求体里却写了 kb-docs”这类隐蔽错误。
+     *
+     * @param request create-collection request
+     * @return created collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats create(CreateCollectionRequest request) throws IOException, InterruptedException {
         validateCreateRequest(request);
@@ -75,6 +86,11 @@ public final class AnaxaCollectionClient {
      *
      * <p>如果 collection 尚不存在，就直接创建；如果已经存在，则回读当前配置，
      * 并校验维度与度量方式是否和调用方期望一致。
+     *
+     * @param request expected collection definition
+     * @return existing or created collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats ensureExists(CreateCollectionRequest request) throws IOException, InterruptedException {
         validateCreateRequest(request);
@@ -104,6 +120,11 @@ public final class AnaxaCollectionClient {
 
     /**
      * 使用 JSON 数组方式写入一批向量。
+     *
+     * @param vectors vectors to upsert
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats upsertJson(Collection<UpsertVector> vectors) throws IOException, InterruptedException {
         return client.sendJson(
@@ -116,6 +137,11 @@ public final class AnaxaCollectionClient {
 
     /**
      * 使用 NDJSON 方式写入一批向量。
+     *
+     * @param vectors vectors to upsert
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats upsertNdjson(Iterable<UpsertVector> vectors) throws IOException, InterruptedException {
         return client.sendNdjsonUpsert(collectionName, Objects.requireNonNull(vectors, "vectors"));
@@ -126,6 +152,11 @@ public final class AnaxaCollectionClient {
      *
      * <p>SDK 会先回读 collection 维度，用它来构建 binary header，
      * 这样调用方不需要再手动维护一份维度参数。
+     *
+     * @param vectors vectors to upsert
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats upsertBinary(Iterable<UpsertVector> vectors) throws IOException, InterruptedException {
         int dimension = stats().dimension();
@@ -134,6 +165,11 @@ public final class AnaxaCollectionClient {
 
     /**
      * 执行 payload-only partial update。
+     *
+     * @param updates payload-only updates to apply
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats partialUpdate(Collection<PartialUpdateVector> updates) throws IOException, InterruptedException {
         return client.sendJson(
@@ -146,6 +182,11 @@ public final class AnaxaCollectionClient {
 
     /**
      * 批量删除向量。
+     *
+     * @param ids vector ids to delete
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats delete(Collection<String> ids) throws IOException, InterruptedException {
         return client.sendJson(
@@ -158,6 +199,11 @@ public final class AnaxaCollectionClient {
 
     /**
      * 执行一次向量检索。
+     *
+     * @param request search request
+     * @return search response
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public SearchResponse search(SearchRequest request) throws IOException, InterruptedException {
         return client.sendJson(
@@ -170,6 +216,12 @@ public final class AnaxaCollectionClient {
 
     /**
      * 使用最简参数执行搜索。
+     *
+     * @param vector query vector
+     * @param topK number of hits to return
+     * @return search response
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public SearchResponse search(float[] vector, int topK) throws IOException, InterruptedException {
         return search(new SearchRequest(vector, topK, Map.of()));
@@ -177,6 +229,13 @@ public final class AnaxaCollectionClient {
 
     /**
      * 使用原始 payload filter Map 执行搜索。
+     *
+     * @param vector query vector
+     * @param topK number of hits to return
+     * @param filter payload filter map
+     * @return search response
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public SearchResponse search(float[] vector, int topK, Map<String, Object> filter)
             throws IOException, InterruptedException {
@@ -185,6 +244,13 @@ public final class AnaxaCollectionClient {
 
     /**
      * 使用 SDK 提供的过滤 DSL 执行搜索。
+     *
+     * @param vector query vector
+     * @param topK number of hits to return
+     * @param filterBuilder payload filter builder
+     * @return search response
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public SearchResponse search(float[] vector, int topK, PayloadFilterBuilder filterBuilder)
             throws IOException, InterruptedException {
@@ -193,6 +259,10 @@ public final class AnaxaCollectionClient {
 
     /**
      * 手工触发 flush。
+     *
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats flush() throws IOException, InterruptedException {
         return client.sendJson("POST", client.path("collections", collectionName, "flush"), null, CollectionStats.class);
@@ -200,6 +270,10 @@ public final class AnaxaCollectionClient {
 
     /**
      * 手工触发 compaction。
+     *
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats compact() throws IOException, InterruptedException {
         return client.sendJson("POST", client.path("collections", collectionName, "compact"), null, CollectionStats.class);
@@ -207,6 +281,11 @@ public final class AnaxaCollectionClient {
 
     /**
      * 备份当前 collection。
+     *
+     * @param backupId backup id to create
+     * @return updated collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats backup(String backupId) throws IOException, InterruptedException {
         return client.sendJson(
@@ -221,6 +300,12 @@ public final class AnaxaCollectionClient {
      * 从指定 backup 恢复到当前 collection 名。
      *
      * <p>适合“把旧备份恢复到一个新 collection 做验证”这种操作。
+     *
+     * @param backupId backup id to restore from
+     * @param sourceCollectionName collection name inside the backup
+     * @return restored collection statistics
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionStats restoreFromBackup(String backupId, String sourceCollectionName)
             throws IOException, InterruptedException {
@@ -237,6 +322,12 @@ public final class AnaxaCollectionClient {
      *
      * <p>这个方法会自动按 batch 切分数据，并根据 {@link BulkIngestOptions#mode()}
      * 选择 JSON / NDJSON / binary 三种传输方式之一。必要时还会在尾部补一次 flush / compact。
+     *
+     * @param vectors vectors to upsert
+     * @param options bulk ingest options
+     * @return bulk ingest result
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public BulkIngestResult bulkUpsert(Iterable<UpsertVector> vectors, BulkIngestOptions options)
             throws IOException, InterruptedException {
@@ -320,6 +411,13 @@ public final class AnaxaCollectionClient {
      *
      * <p>它会先确保 collection 存在，再执行批量导入，并且无论调用方是否显式开启，
      * 都会在末尾补一次 flush，让数据尽快进入更稳定的读路径。
+     *
+     * @param request expected collection definition
+     * @param vectors vectors to ingest
+     * @param options bulk ingest options
+     * @return bulk ingest result
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public BulkIngestResult loadForServing(
             CreateCollectionRequest request,
@@ -342,6 +440,11 @@ public final class AnaxaCollectionClient {
      *   <li>delete 已删除的文档</li>
      *   <li>如有需要，再 flush / compact</li>
      * </ol>
+     *
+     * @param plan synchronization plan
+     * @return synchronization result
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public CollectionSyncResult synchronize(CollectionSyncPlan plan) throws IOException, InterruptedException {
         CollectionSyncPlan resolvedPlan = Objects.requireNonNull(plan, "plan");

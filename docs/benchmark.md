@@ -50,7 +50,7 @@ mvn -pl anaxa-benchmark -am -DskipTests package
 
 ```bash
 java --enable-preview ^
-  -jar anaxa-benchmark\target\anaxa-benchmark-1.0-SNAPSHOT.jar ^
+  -jar anaxa-benchmark\target\anaxa-benchmark-1.1.jar ^
   --profile=markdown-kb ^
   --data-dir=D:\anaxa-data\bench-suite
 ```
@@ -59,7 +59,7 @@ java --enable-preview ^
 
 ```bash
 java --enable-preview ^
-  -jar anaxa-benchmark\target\anaxa-benchmark-1.0-SNAPSHOT.jar ^
+  -jar anaxa-benchmark\target\anaxa-benchmark-1.1.jar ^
   --base-url=http://127.0.0.1:8080 ^
   --tenant-id=team-a ^
   --profile=standard

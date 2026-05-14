@@ -151,3 +151,61 @@ jobs:
             release-artifacts/anaxa-benchmark-${{ steps.release.outputs.version }}.jar
             release-artifacts/anaxa-sdk-${{ steps.release.outputs.version }}.jar
             release-artifacts/anaxa-${{ steps.release.outputs.version }}-checksums.sha256
+
+  publish-central:
+    name: Publish SDK to Maven Central
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK and Maven credentials
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Verify tag matches project version
+        id: central-release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          project_version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
+          if [[ "${GITHUB_REF_NAME}" != "${project_version}" ]]; then
+            echo "Triggered tag '${GITHUB_REF_NAME}' does not match parent pom version '${project_version}'."
+            exit 1
+          fi
+
+          lower_version="${project_version,,}"
+          if [[ "${lower_version}" =~ snapshot|alpha|beta|rc|milestone|preview|pre|dev|nightly ]]; then
+            echo "Version '${project_version}' is a pre-release; skipping Maven Central publish."
+            echo "publish=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "publish=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish parent, common, and SDK to Maven Central
+        if: steps.central-release.outputs.publish == 'true'
+        shell: bash
+        run: >-
+          mvn --batch-mode --no-transfer-progress
+          -Pcentral
+          -pl anaxa-common,anaxa-sdk
+          -am
+          -Dgpg.passphrase="${GPG_PASSPHRASE}"
+          deploy
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}

@@ -10,6 +10,15 @@ import java.util.Objects;
  *
  * <p>相比只返回一次最终的 {@link CollectionStats}，这个结果还保留了“写了多少条、拆了几批、
  * 是否顺带 flush/compact”等流程级信息，便于业务方做导入日志和观测。
+ *
+ * @param collectionName collection name
+ * @param mode transport mode used for ingest
+ * @param vectorsIngested number of ingested vectors
+ * @param batchesSent number of batches sent
+ * @param flushed whether a flush was performed
+ * @param compacted whether compaction was performed
+ * @param elapsed elapsed time
+ * @param finalStats final collection statistics
  */
 public record BulkIngestResult(
         String collectionName,
@@ -21,6 +30,9 @@ public record BulkIngestResult(
         Duration elapsed,
         CollectionStats finalStats
 ) {
+    /**
+     * Creates a bulk ingest result.
+     */
     public BulkIngestResult {
         collectionName = Objects.requireNonNull(collectionName, "collectionName").trim();
         mode = Objects.requireNonNull(mode, "mode");

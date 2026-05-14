@@ -28,6 +28,9 @@ public final class AnaxaSdkExamples {
 
     /**
      * 最基础的 CRUD + 搜索示例。
+     *
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public static void basicOperations() throws IOException, InterruptedException {
         // SDK 本身只依赖 slf4j-api；日志实现由业务方自己在应用里提供。
@@ -86,6 +89,9 @@ public final class AnaxaSdkExamples {
 
     /**
      * 面向“首批导入后马上切读”的示例。
+     *
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public static void bulkLoadAndPrepareForServing() throws IOException, InterruptedException {
         try (AnaxaClient client = AnaxaClient.builder()
@@ -113,6 +119,9 @@ public final class AnaxaSdkExamples {
 
     /**
      * 面向“知识库增量同步”的示例。
+     *
+     * @throws IOException when the HTTP request fails
+     * @throws InterruptedException when the request thread is interrupted
      */
     public static void synchronizeKnowledgeBase() throws IOException, InterruptedException {
         try (AnaxaClient client = AnaxaClient.builder()

@@ -22,7 +22,7 @@ mvn "-Dmaven.repo.local=D:\jarLibrary" clean package
 可执行产物：
 
 ```text
-anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar
+anaxa-server\target\anaxa-server-1.1.jar
 ```
 
 ## 3. 启动方式
@@ -31,7 +31,7 @@ anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar
 
 ```powershell
 java --enable-preview `
-  -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
+  -jar anaxa-server\target\anaxa-server-1.1.jar `
   --data-dir=D:\anaxa-data `
   --allow-open-access=true
 ```
@@ -44,7 +44,7 @@ java --enable-preview `
 java --enable-preview `
   -XX:+UseZGC `
   -Xms256m -Xmx1g `
-  -jar anaxa-server\target\anaxa-server-1.0-SNAPSHOT.jar `
+  -jar anaxa-server\target\anaxa-server-1.1.jar `
   --host=0.0.0.0 `
   --port=8080 `
   --data-dir=D:\anaxa-data `
