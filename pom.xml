@@ -6,7 +6,7 @@
 
     <groupId>cn.suhoan</groupId>
     <artifactId>anaxa</artifactId>
-    <version>1.3</version>
+    <version>1.4</version>
     <packaging>pom</packaging>
     <name>AnaxaDB</name>
     <description>Standalone vector database and Java SDK for AnaxaDB.</description>

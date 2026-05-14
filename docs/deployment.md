@@ -46,7 +46,7 @@ java --enable-preview `
   -Xms256m -Xmx1g `
   -jar anaxa-server\target\anaxa-server-1.1.jar `
   --host=0.0.0.0 `
-  --port=8080 `
+  --port=30720 `
   --data-dir=D:\anaxa-data `
   --default-flush-threshold-bytes=67108864 `
   --api-keys=prod-secret-1,prod-secret-2 `
@@ -70,7 +70,7 @@ java --enable-preview `
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--host` | `0.0.0.0` | 监听地址 |
-| `--port` | `8080` | 监听端口 |
+| `--port` | `30720` | 监听端口 |
 | `--data-dir` | `data` | 数据目录 |
 | `--default-flush-threshold-bytes` | `67108864` | collection 默认 flush 阈值 |
 | `--api-keys` | 空 | 静态 API Key 列表，逗号分隔 |
@@ -131,7 +131,7 @@ java --enable-preview `
 
 ### 5.6 WebUI
 
-- 服务默认启用内置测试控制台：`http://127.0.0.1:8080/ui`
+- 服务默认启用内置测试控制台：`http://127.0.0.1:30720/ui`
 - WebUI 页面本身不要求 API key，但页面发出的数据库请求仍然走现有 API Key / RBAC / tenant 校验
 - 如果生产环境不希望暴露测试页面，可设置 `--web-ui-enabled=false`
 

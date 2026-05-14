@@ -19,14 +19,14 @@ class EnvironmentBenchmarkRunnerTest {
     @Test
     void parsesRemoteModeArguments() {
         BenchmarkConfig config = BenchmarkConfig.fromArgs(new String[]{
-                "--base-url=http://127.0.0.1:8080",
+                "--base-url=http://127.0.0.1:30720",
                 "--profile=markdown-kb",
                 "--tenant-id=team-a",
                 "--collection-prefix=Env Bench"
         });
 
         assertFalse(config.embeddedServer());
-        assertEquals("http://127.0.0.1:8080", config.baseUrl());
+        assertEquals("http://127.0.0.1:30720", config.baseUrl());
         assertEquals(ScenarioPreset.MARKDOWN_KB, config.preset());
         assertEquals("team-a", config.tenantId());
         assertEquals("env-bench", config.collectionPrefix());

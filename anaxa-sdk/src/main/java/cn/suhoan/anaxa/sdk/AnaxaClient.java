@@ -516,7 +516,7 @@ public final class AnaxaClient implements AutoCloseable {
         }
 
         /**
-         * 设置服务端基础地址，例如 {@code http://127.0.0.1:8080}。
+         * 设置服务端基础地址，例如 {@code http://127.0.0.1:30720}。
          *
          * @param newBaseUri server base URI string
          * @return this builder

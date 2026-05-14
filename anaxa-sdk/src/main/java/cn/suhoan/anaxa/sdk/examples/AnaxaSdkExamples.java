@@ -35,7 +35,7 @@ public final class AnaxaSdkExamples {
     public static void basicOperations() throws IOException, InterruptedException {
         // SDK 本身只依赖 slf4j-api；日志实现由业务方自己在应用里提供。
         try (AnaxaClient client = AnaxaClient.builder()
-                .baseUri("http://127.0.0.1:8080")
+                .baseUri("http://127.0.0.1:30720")
                 .apiKey("writer-secret")
                 .defaultTenantId("team-a")
                 .build()) {
@@ -95,7 +95,7 @@ public final class AnaxaSdkExamples {
      */
     public static void bulkLoadAndPrepareForServing() throws IOException, InterruptedException {
         try (AnaxaClient client = AnaxaClient.builder()
-                .baseUri("http://127.0.0.1:8080")
+                .baseUri("http://127.0.0.1:30720")
                 .apiKey("writer-secret")
                 .defaultTenantId("team-a")
                 .build()) {
@@ -125,7 +125,7 @@ public final class AnaxaSdkExamples {
      */
     public static void synchronizeKnowledgeBase() throws IOException, InterruptedException {
         try (AnaxaClient client = AnaxaClient.builder()
-                .baseUri("http://127.0.0.1:8080")
+                .baseUri("http://127.0.0.1:30720")
                 .apiKey("writer-secret")
                 .defaultTenantId("team-a")
                 .build()) {

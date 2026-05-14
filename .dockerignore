@@ -1,0 +1,12 @@
+.git
+.github
+target
+*/target
+.idea
+.vscode
+*.iml
+*.log
+data
+anaxa-data
+release-artifacts
+release-notes.md

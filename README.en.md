@@ -1,8 +1,16 @@
-# AnaxaDB
+<p align="center">
+  <img src="logo.png" alt="Peony" width="128" height="128">
+</p>
+
+<h1 align="center">AnaxaDB</h1>
+
+<p align="center">
+  <strong>AnaxaDB is a standalone vector database built on modern Java. It provides a single-node HTTP server, a Java SDK, HNSW+PQ vector search, tenant-aware operations, WAL/segment recovery, backup and restore, Prometheus metrics, audit logs, and a built-in Web UI for local testing.</strong>
+</p>
+
+---
 
 [简体中文](README.md) | English
-
-AnaxaDB is a standalone vector database built on modern Java. It provides a single-node HTTP server, a Java SDK, HNSW+PQ vector search, tenant-aware operations, WAL/segment recovery, backup and restore, Prometheus metrics, audit logs, and a built-in Web UI for local testing.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 [![Java](https://img.shields.io/badge/java-26-orange.svg)](pom.xml)
@@ -51,13 +59,13 @@ java --enable-preview \
 Visit:
 
 ```text
-http://127.0.0.1:8080/ui
+http://127.0.0.1:30720/ui
 ```
 
 ### Create A Collection
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections" \
+curl -X POST "http://127.0.0.1:30720/collections" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "docs",
@@ -69,7 +77,7 @@ curl -X POST "http://127.0.0.1:8080/collections" \
 ### Upsert Vectors
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/vectors" \
   -H "Content-Type: application/json" \
   -d '{
     "vectors": [
@@ -87,7 +95,7 @@ The vector dimension must match the collection dimension. The shortened vector a
 ### Search
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/search" \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, 0.2, 0.3],
@@ -104,6 +112,38 @@ Download release artifacts from GitHub Releases:
 - `anaxa-sdk-<version>.jar`: Java SDK library.
 - `anaxa-<version>-checksums.sha256`: SHA-256 checksums for release artifacts.
 
+## Docker
+
+Stable releases are published as Docker images:
+
+- `ghcr.io/<owner>/<repo>:<version>`
+- `ghcr.io/<owner>/<repo>:latest`
+- `swr.cn-east-3.myhuaweicloud.com/suhoan/anaxa:<version>`
+- `swr.cn-east-3.myhuaweicloud.com/suhoan/anaxa:latest`
+
+Run the server image:
+
+```bash
+docker run --rm \
+  -p 30720:30720 \
+  -v anaxa-data:/data/anaxa \
+  swr.cn-east-3.myhuaweicloud.com/suhoan/anaxa:latest \
+  --host=0.0.0.0 \
+  --port=30720 \
+  --data-dir=/data/anaxa \
+  --allow-open-access=true
+```
+
+For mainland China environments, replace the image registry as needed.
+
+To build from source and start locally with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The included `docker-compose.yml` builds the image from the current source tree instead of pulling a prebuilt image.
+
 ## Java SDK
 
 The SDK module wraps the HTTP API with JDK `HttpClient` and provides low-level API calls plus higher-level ingestion helpers.
@@ -112,7 +152,7 @@ The SDK module wraps the HTTP API with JDK `HttpClient` and provides low-level A
 <dependency>
   <groupId>cn.suhoan</groupId>
   <artifactId>anaxa-sdk</artifactId>
-  <version>1.3</version>
+  <version>1.4</version>
 </dependency>
 ```
 

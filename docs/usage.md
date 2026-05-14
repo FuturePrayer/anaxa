@@ -1,11 +1,11 @@
 # 使用示例
 
-假设服务运行在 `http://127.0.0.1:8080`。
+假设服务运行在 `http://127.0.0.1:30720`。
 
 ## 1. 创建集合
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections" \
+curl -X POST "http://127.0.0.1:30720/collections" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: prod-secret-1" \
   -d '{
@@ -25,7 +25,7 @@ curl -X POST "http://127.0.0.1:8080/collections" \
 ## 2. JSON 批量写入
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/vectors" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: prod-secret-1" \
   -d '{
@@ -53,7 +53,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
 ## 3. NDJSON 批量导入
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/vectors" \
   -H "Content-Type: application/x-ndjson" \
   -H "X-API-Key: prod-secret-1" \
   --data-binary @- <<'EOF'
@@ -86,7 +86,7 @@ for item in vectors:
     buffer += payload_bytes
 
 request = urllib.request.Request(
-    "http://127.0.0.1:8080/collections/docs/vectors",
+    "http://127.0.0.1:30720/collections/docs/vectors",
     data=bytes(buffer),
     headers={
         "Content-Type": "application/vnd.anaxa.vector-batch",
@@ -102,7 +102,7 @@ PY
 ## 5. Partial update（只改 payload）
 
 ```bash
-curl -X PATCH "http://127.0.0.1:8080/collections/docs/vectors" \
+curl -X PATCH "http://127.0.0.1:30720/collections/docs/vectors" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: prod-secret-1" \
   -d '{
@@ -132,7 +132,7 @@ curl -X PATCH "http://127.0.0.1:8080/collections/docs/vectors" \
 ## 6. 相似检索
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/search" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: prod-secret-1" \
   -d '{
@@ -147,7 +147,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
 ## 7. 复杂过滤检索
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/search" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: reader-secret" \
   -d '{
@@ -166,7 +166,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
 ## 8. 删除文档
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/deletions" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/deletions" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: prod-secret-1" \
   -d '{
@@ -177,7 +177,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/deletions" \
 ## 9. 导入完成后手动 flush
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/flush" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/flush" \
   -H "X-API-Key: admin-secret"
 ```
 
@@ -186,32 +186,32 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/flush" \
 ## 10. 离峰手动 compaction
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/compact" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/compact" \
   -H "X-API-Key: admin-secret"
 ```
 
 ## 11. 查看健康状态与集合统计
 
 ```bash
-curl "http://127.0.0.1:8080/health"
+curl "http://127.0.0.1:30720/health"
 ```
 
 ```bash
-curl "http://127.0.0.1:8080/collections/docs" \
+curl "http://127.0.0.1:30720/collections/docs" \
   -H "X-API-Key: prod-secret-1"
 ```
 
 ## 12. 查询 Prometheus 指标
 
 ```bash
-curl "http://127.0.0.1:8080/metrics" \
+curl "http://127.0.0.1:30720/metrics" \
   -H "X-API-Key: admin-secret"
 ```
 
 ## 13. 执行备份
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/backup" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/backup" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: admin-secret" \
   -d '{
@@ -222,12 +222,12 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/backup" \
 ## 14. 查看 tenant 运维信息与备份盘点
 
 ```bash
-curl "http://127.0.0.1:8080/tenants/team-a" \
+curl "http://127.0.0.1:30720/tenants/team-a" \
   -H "X-API-Key: admin-secret"
 ```
 
 ```bash
-curl "http://127.0.0.1:8080/backups" \
+curl "http://127.0.0.1:30720/backups" \
   -H "X-API-Key: admin-secret" \
   -H "X-Tenant-Id: team-a"
 ```
@@ -235,7 +235,7 @@ curl "http://127.0.0.1:8080/backups" \
 ## 15. 对 tenant 执行手工 snapshot
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/tenants/team-a/snapshot" \
+curl -X POST "http://127.0.0.1:30720/tenants/team-a/snapshot" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: admin-secret" \
   -d '{
@@ -246,7 +246,7 @@ curl -X POST "http://127.0.0.1:8080/tenants/team-a/snapshot" \
 ## 16. 从备份恢复到新集合
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/backups/nightly-001/restore" \
+curl -X POST "http://127.0.0.1:30720/backups/nightly-001/restore" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: admin-secret" \
   -d '{

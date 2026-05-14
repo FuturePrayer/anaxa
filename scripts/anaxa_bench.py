@@ -103,7 +103,7 @@ class HttpJsonClient:
 
 def parse_args() -> BenchmarkConfig:
     parser = argparse.ArgumentParser(description="Benchmark AnaxaDB ingest and search performance.")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8080", help="Server base URL.")
+    parser.add_argument("--base-url", default="http://127.0.0.1:30720", help="Server base URL.")
     parser.add_argument("--collection", default=f"bench-{int(time.time())}", help="Target collection name.")
     parser.add_argument("--dimension", type=int, default=128, help="Vector dimension.")
     parser.add_argument("--metric", default="COSINE", choices=("COSINE", "L2"), help="Collection metric.")

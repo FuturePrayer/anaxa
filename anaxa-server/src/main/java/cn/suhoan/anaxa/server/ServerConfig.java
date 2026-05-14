@@ -296,7 +296,7 @@ public record ServerConfig(
 
     public static ServerConfig fromArgs(String[] args) {
         String host = "0.0.0.0";
-        int port = 8080;
+        int port = 30720;
         Path dataDirectory = Paths.get("data");
         long flushThresholdBytes = VectorDatabaseEngine.DEFAULT_FLUSH_THRESHOLD_BYTES;
         Set<String> apiKeys = Set.of();

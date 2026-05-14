@@ -1,8 +1,16 @@
-# AnaxaDB
+<p align="center">
+  <img src="logo.png" alt="Peony" width="128" height="128">
+</p>
+
+<h1 align="center">AnaxaDB</h1>
+
+<p align="center">
+  <strong>AnaxaDB 是一个基于现代 Java 构建的独立式向量数据库。它提供单机 HTTP 服务、Java SDK、HNSW+PQ 向量检索、多租户操作、WAL/Segment 恢复、备份恢复、Prometheus 指标、审计日志，以及用于本地测试的内置 Web UI。</strong>
+</p>
+
+---
 
 简体中文 | [English](README.en.md)
-
-AnaxaDB 是一个基于现代 Java 构建的独立式向量数据库。它提供单机 HTTP 服务、Java SDK、HNSW+PQ 向量检索、多租户操作、WAL/Segment 恢复、备份恢复、Prometheus 指标、审计日志，以及用于本地测试的内置 Web UI。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 [![Java](https://img.shields.io/badge/java-26-orange.svg)](pom.xml)
@@ -51,13 +59,13 @@ java --enable-preview \
 访问：
 
 ```text
-http://127.0.0.1:8080/ui
+http://127.0.0.1:30720/ui
 ```
 
 ### 创建集合
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections" \
+curl -X POST "http://127.0.0.1:30720/collections" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "docs",
@@ -69,7 +77,7 @@ curl -X POST "http://127.0.0.1:8080/collections" \
 ### 写入向量
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/vectors" \
   -H "Content-Type: application/json" \
   -d '{
     "vectors": [
@@ -87,7 +95,7 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/vectors" \
 ### 检索
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
+curl -X POST "http://127.0.0.1:30720/collections/docs/search" \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, 0.2, 0.3],
@@ -104,6 +112,38 @@ curl -X POST "http://127.0.0.1:8080/collections/docs/search" \
 - `anaxa-sdk-<version>.jar`：Java SDK 类库。
 - `anaxa-<version>-checksums.sha256`：发布产物的 SHA-256 校验文件。
 
+## Docker
+
+稳定版本会发布 Docker 镜像：
+
+- `ghcr.io/<owner>/<repo>:<version>`
+- `ghcr.io/<owner>/<repo>:latest`
+- `swr.cn-east-3.myhuaweicloud.com/suhoan/anaxa:<version>`
+- `swr.cn-east-3.myhuaweicloud.com/suhoan/anaxa:latest`
+
+运行服务镜像：
+
+```bash
+docker run --rm \
+  -p 30720:30720 \
+  -v anaxa-data:/data/anaxa \
+  swr.cn-east-3.myhuaweicloud.com/suhoan/anaxa:latest \
+  --host=0.0.0.0 \
+  --port=30720 \
+  --data-dir=/data/anaxa \
+  --allow-open-access=true
+```
+
+中国大陆环境可按需替换镜像源。
+
+如果希望从当前源码构建并启动，可以使用 Docker Compose：
+
+```bash
+docker compose up --build
+```
+
+仓库内置的 `docker-compose.yml` 会从当前源码树构建镜像，而不是拉取预构建镜像。
+
 ## Java SDK
 
 SDK 模块基于 JDK `HttpClient` 封装 HTTP API，提供底层 API 调用和更高层的写入辅助流程。
@@ -112,7 +152,7 @@ SDK 模块基于 JDK `HttpClient` 封装 HTTP API，提供底层 API 调用和�
 <dependency>
   <groupId>cn.suhoan</groupId>
   <artifactId>anaxa-sdk</artifactId>
-  <version>1.3</version>
+  <version>1.4</version>
 </dependency>
 ```
 

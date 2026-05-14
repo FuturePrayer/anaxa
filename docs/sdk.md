@@ -18,7 +18,7 @@
   <dependency>
     <groupId>cn.suhoan</groupId>
     <artifactId>anaxa-sdk</artifactId>
-    <version>1.3</version>
+    <version>1.4</version>
   </dependency>
 
   <!-- SDK 只依赖 slf4j-api，日志实现由接入方自行提供 -->
@@ -53,7 +53,7 @@ mvn "-Dmaven.repo.local=D:\jarLibrary" -pl anaxa-sdk -am clean test
 
 ```java
 try (AnaxaClient client = AnaxaClient.builder()
-        .baseUri("http://127.0.0.1:8080")
+        .baseUri("http://127.0.0.1:30720")
         .apiKey("writer-secret")
         .defaultTenantId("team-a")
         .build()) {

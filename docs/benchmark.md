@@ -8,7 +8,7 @@
 
 ```bash
 python scripts\anaxa_bench.py ^
-  --base-url http://127.0.0.1:8080 ^
+  --base-url http://127.0.0.1:30720 ^
   --api-key admin-secret ^
   --tenant-id team-a ^
   --collection bench-team-a ^
@@ -60,7 +60,7 @@ java --enable-preview ^
 ```bash
 java --enable-preview ^
   -jar anaxa-benchmark\target\anaxa-benchmark-1.1.jar ^
-  --base-url=http://127.0.0.1:8080 ^
+  --base-url=http://127.0.0.1:30720 ^
   --tenant-id=team-a ^
   --profile=standard
 ```

@@ -142,7 +142,7 @@ public record BenchmarkConfig(
                   --keep-data=true|false or --keep-data
                 
                 Remote server mode:
-                  --base-url=http://127.0.0.1:8080
+                  --base-url=http://127.0.0.1:30720
                   --api-key=<optional>
                   --tenant-id=<optional>
                 """;
