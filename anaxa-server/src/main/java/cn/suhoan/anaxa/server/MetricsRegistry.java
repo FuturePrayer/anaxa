@@ -1,16 +1,20 @@
 package cn.suhoan.anaxa.server;
 
 import cn.suhoan.anaxa.common.model.CollectionStats;
+import cn.suhoan.anaxa.engine.BackgroundTaskMetrics;
 import cn.suhoan.anaxa.engine.CollectionSearchMetrics;
+import cn.suhoan.anaxa.engine.CollectionRuntimeMetrics;
 import cn.suhoan.anaxa.engine.CompactionMetrics;
 import cn.suhoan.anaxa.engine.EngineObserver;
 import cn.suhoan.anaxa.engine.FlushMetrics;
 import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
 
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.ToLongFunction;
 import java.util.function.Predicate;
 
 final class MetricsRegistry implements EngineObserver {
@@ -51,7 +55,12 @@ final class MetricsRegistry implements EngineObserver {
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> snapshotDurationCount = new ConcurrentHashMap<>();
 
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchSourceCounts = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchSourceVectors = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchSourceBatches = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchSourceThrottled = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ModeMetricKey, LongAdder> searchSourceModeCounts = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<StageMetricKey, LongAdder> searchStageDurationNanos = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<StageMetricKey, LongAdder> searchStageDurationCount = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchFilterCandidates = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchApproximateCandidates = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchRerankedCandidates = new ConcurrentHashMap<>();
@@ -62,6 +71,13 @@ final class MetricsRegistry implements EngineObserver {
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchQueryCacheHits = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchQueryCacheMisses = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<CollectionMetricKey, LongAdder> searchResults = new ConcurrentHashMap<>();
+
+    private final ConcurrentHashMap<TaskMetricKey, LongAdder> backgroundTaskCounts = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TaskMetricKey, LongAdder> backgroundTaskFailures = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TaskMetricKey, LongAdder> backgroundTaskQueuedNanos = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TaskMetricKey, LongAdder> backgroundTaskYieldNanos = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TaskMetricKey, LongAdder> backgroundTaskDurationNanos = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TaskMetricKey, LongAdder> backgroundTaskDurationCount = new ConcurrentHashMap<>();
 
     private final LongAdder authFailures = new LongAdder();
     private final LongAdder authorizationDenied = new LongAdder();
@@ -159,10 +175,18 @@ final class MetricsRegistry implements EngineObserver {
     public void onSearchCompleted(CollectionSearchMetrics metrics) {
         CollectionMetricKey key = new CollectionMetricKey(metrics.tenantId(), metrics.collectionName());
         searchSourceCounts.computeIfAbsent(key, ignored -> new LongAdder()).add(metrics.sourceCount());
+        searchSourceVectors.computeIfAbsent(key, ignored -> new LongAdder()).add(metrics.totalSourceVectors());
+        searchSourceBatches.computeIfAbsent(key, ignored -> new LongAdder()).add(metrics.sourceBatchCount());
+        if (metrics.sourceThrottled()) {
+            searchSourceThrottled.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        }
         searchSourceModeCounts.computeIfAbsent(new ModeMetricKey(metrics.tenantId(), metrics.collectionName(), "exact"), ignored -> new LongAdder())
                 .add(metrics.exactSourceCount());
         searchSourceModeCounts.computeIfAbsent(new ModeMetricKey(metrics.tenantId(), metrics.collectionName(), "approximate"), ignored -> new LongAdder())
                 .add(metrics.approximateSourceCount());
+        recordSearchStage(metrics, "source_selection", metrics.sourceSelectionNanos());
+        recordSearchStage(metrics, "source_search", metrics.sourceSearchNanos());
+        recordSearchStage(metrics, "merge", metrics.mergeNanos());
         searchFilterCandidates.computeIfAbsent(key, ignored -> new LongAdder()).add(metrics.filterCandidateCount());
         searchApproximateCandidates.computeIfAbsent(key, ignored -> new LongAdder()).add(metrics.approximateCandidateCount());
         searchRerankedCandidates.computeIfAbsent(key, ignored -> new LongAdder()).add(metrics.rerankedCandidateCount());
@@ -176,6 +200,25 @@ final class MetricsRegistry implements EngineObserver {
         } else {
             searchQueryCacheMisses.computeIfAbsent(key, ignored -> new LongAdder()).increment();
         }
+    }
+
+    @Override
+    public void onBackgroundTaskCompleted(BackgroundTaskMetrics metrics) {
+        TaskMetricKey key = new TaskMetricKey(metrics.tenantId(), metrics.collectionName(), metrics.taskType());
+        backgroundTaskCounts.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        if (!metrics.success()) {
+            backgroundTaskFailures.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+        }
+        backgroundTaskQueuedNanos.computeIfAbsent(key, ignored -> new LongAdder()).add(Math.max(0L, metrics.queuedNanos()));
+        backgroundTaskYieldNanos.computeIfAbsent(key, ignored -> new LongAdder()).add(Math.max(0L, metrics.yieldNanos()));
+        backgroundTaskDurationNanos.computeIfAbsent(key, ignored -> new LongAdder()).add(Math.max(0L, metrics.durationNanos()));
+        backgroundTaskDurationCount.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+    }
+
+    private void recordSearchStage(CollectionSearchMetrics metrics, String stage, long durationNanos) {
+        StageMetricKey key = new StageMetricKey(metrics.tenantId(), metrics.collectionName(), stage);
+        searchStageDurationNanos.computeIfAbsent(key, ignored -> new LongAdder()).add(Math.max(0L, durationNanos));
+        searchStageDurationCount.computeIfAbsent(key, ignored -> new LongAdder()).increment();
     }
 
     String scrape(VectorDatabaseEngine engine) {
@@ -285,7 +328,11 @@ final class MetricsRegistry implements EngineObserver {
         appendCollectionDuration(builder, "anaxa_lifecycle_snapshot_duration_seconds", snapshotDurationNanos, snapshotDurationCount, collectionFilter);
 
         appendCollectionCounters(builder, "anaxa_search_sources_total", searchSourceCounts, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_search_source_vectors_total", searchSourceVectors, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_search_source_batches_total", searchSourceBatches, collectionFilter);
+        appendCollectionCounters(builder, "anaxa_search_source_throttled_total", searchSourceThrottled, collectionFilter);
         appendModeCounters(builder, "anaxa_search_source_queries_total", searchSourceModeCounts, modeFilter);
+        appendStageDuration(builder, "anaxa_search_stage_duration_seconds", searchStageDurationNanos, searchStageDurationCount, key -> tenantScope == null || key.tenantId().equals(tenantScope));
         appendCollectionCounters(builder, "anaxa_search_filter_candidates_total", searchFilterCandidates, collectionFilter);
         appendCollectionCounters(builder, "anaxa_search_approximate_candidates_total", searchApproximateCandidates, collectionFilter);
         appendCollectionCounters(builder, "anaxa_search_reranked_candidates_total", searchRerankedCandidates, collectionFilter);
@@ -296,6 +343,12 @@ final class MetricsRegistry implements EngineObserver {
         appendCollectionCounters(builder, "anaxa_search_query_cache_hits_total", searchQueryCacheHits, collectionFilter);
         appendCollectionCounters(builder, "anaxa_search_query_cache_misses_total", searchQueryCacheMisses, collectionFilter);
         appendCollectionCounters(builder, "anaxa_search_results_total", searchResults, collectionFilter);
+
+        appendTaskCounters(builder, "anaxa_background_tasks_total", backgroundTaskCounts, key -> tenantScope == null || key.tenantId().equals(tenantScope));
+        appendTaskCounters(builder, "anaxa_background_task_failures_total", backgroundTaskFailures, key -> tenantScope == null || key.tenantId().equals(tenantScope));
+        appendTaskDuration(builder, "anaxa_background_task_duration_seconds", backgroundTaskDurationNanos, backgroundTaskDurationCount, key -> tenantScope == null || key.tenantId().equals(tenantScope));
+        appendTaskQueuedDuration(builder, "anaxa_background_task_queued_seconds", backgroundTaskQueuedNanos, backgroundTaskDurationCount, key -> tenantScope == null || key.tenantId().equals(tenantScope));
+        appendTaskQueuedDuration(builder, "anaxa_background_task_yield_seconds", backgroundTaskYieldNanos, backgroundTaskDurationCount, key -> tenantScope == null || key.tenantId().equals(tenantScope));
 
         var collections = tenantScope == null ? engine.listCollections() : engine.listCollections(tenantScope);
         long liveVectors = collections.stream().mapToLong(CollectionStats::liveVectorCount).sum();
@@ -350,6 +403,17 @@ final class MetricsRegistry implements EngineObserver {
                         .append(stats.storageBytes())
                         .append('\n'));
 
+        List<CollectionRuntimeMetrics> runtimeMetrics = tenantScope == null ? engine.runtimeMetrics() : engine.runtimeMetrics(tenantScope);
+        appendRuntimeGauge(builder, "anaxa_engine_active_searches", runtimeMetrics, CollectionRuntimeMetrics::activeSearches);
+        appendRuntimeGauge(builder, "anaxa_engine_active_foreground_searches", runtimeMetrics, CollectionRuntimeMetrics::activeForegroundSearches);
+        appendRuntimeGauge(builder, "anaxa_engine_adaptive_source_search_limit", runtimeMetrics, CollectionRuntimeMetrics::adaptiveSourceSearchLimit);
+        appendRuntimeGauge(builder, "anaxa_engine_pending_flush_memtables", runtimeMetrics, CollectionRuntimeMetrics::pendingFlushMemTables);
+        appendRuntimeGauge(builder, "anaxa_engine_queued_warm_tasks", runtimeMetrics, CollectionRuntimeMetrics::queuedWarmTasks);
+        appendRuntimeGauge(builder, "anaxa_engine_resident_source_bytes", runtimeMetrics, CollectionRuntimeMetrics::residentSourceBytes);
+        appendRuntimeGauge(builder, "anaxa_engine_resident_sources", runtimeMetrics, CollectionRuntimeMetrics::residentSourceCount);
+        appendRuntimeGauge(builder, "anaxa_engine_flush_in_progress", runtimeMetrics, metric -> metric.flushInProgress() ? 1L : 0L);
+        appendRuntimeGauge(builder, "anaxa_engine_compaction_in_progress", runtimeMetrics, metric -> metric.compactionInProgress() ? 1L : 0L);
+
         return builder.toString();
     }
 
@@ -395,6 +459,133 @@ final class MetricsRegistry implements EngineObserver {
                         .append('\n'));
     }
 
+    private static void appendStageDuration(
+            StringBuilder builder,
+            String metricName,
+            ConcurrentHashMap<StageMetricKey, LongAdder> sums,
+            ConcurrentHashMap<StageMetricKey, LongAdder> counts,
+            Predicate<StageMetricKey> filter
+    ) {
+        builder.append("# TYPE ").append(metricName).append("_sum counter\n");
+        sums.entrySet().stream()
+                .filter(entry -> filter.test(entry.getKey()))
+                .sorted(Comparator.comparing(entry -> entry.getKey().tenantId()
+                        + "/"
+                        + entry.getKey().collectionName()
+                        + "/"
+                        + entry.getKey().stage()))
+                .forEach(entry -> builder.append(metricName)
+                        .append("_sum")
+                        .append(labels(Map.of(
+                                "tenant", entry.getKey().tenantId(),
+                                "collection", entry.getKey().collectionName(),
+                                "stage", entry.getKey().stage()
+                        )))
+                        .append(' ')
+                        .append(entry.getValue().sum() / 1_000_000_000.0D)
+                        .append('\n'));
+
+        builder.append("# TYPE ").append(metricName).append("_count counter\n");
+        counts.entrySet().stream()
+                .filter(entry -> filter.test(entry.getKey()))
+                .sorted(Comparator.comparing(entry -> entry.getKey().tenantId()
+                        + "/"
+                        + entry.getKey().collectionName()
+                        + "/"
+                        + entry.getKey().stage()))
+                .forEach(entry -> builder.append(metricName)
+                        .append("_count")
+                        .append(labels(Map.of(
+                                "tenant", entry.getKey().tenantId(),
+                                "collection", entry.getKey().collectionName(),
+                                "stage", entry.getKey().stage()
+                        )))
+                        .append(' ')
+                        .append(entry.getValue().sum())
+                        .append('\n'));
+    }
+
+    private static void appendTaskCounters(
+            StringBuilder builder,
+            String metricName,
+            ConcurrentHashMap<TaskMetricKey, LongAdder> counters,
+            Predicate<TaskMetricKey> filter
+    ) {
+        builder.append("# TYPE ").append(metricName).append(" counter\n");
+        counters.entrySet().stream()
+                .filter(entry -> filter.test(entry.getKey()))
+                .sorted(Comparator.comparing(entry -> entry.getKey().tenantId()
+                        + "/"
+                        + entry.getKey().collectionName()
+                        + "/"
+                        + entry.getKey().taskType()))
+                .forEach(entry -> builder.append(metricName)
+                        .append(labels(Map.of(
+                                "tenant", entry.getKey().tenantId(),
+                                "collection", entry.getKey().collectionName(),
+                                "task", entry.getKey().taskType()
+                        )))
+                        .append(' ')
+                        .append(entry.getValue().sum())
+                        .append('\n'));
+    }
+
+    private static void appendTaskDuration(
+            StringBuilder builder,
+            String metricName,
+            ConcurrentHashMap<TaskMetricKey, LongAdder> sums,
+            ConcurrentHashMap<TaskMetricKey, LongAdder> counts,
+            Predicate<TaskMetricKey> filter
+    ) {
+        builder.append("# TYPE ").append(metricName).append("_sum counter\n");
+        sums.entrySet().stream()
+                .filter(entry -> filter.test(entry.getKey()))
+                .sorted(Comparator.comparing(entry -> entry.getKey().tenantId()
+                        + "/"
+                        + entry.getKey().collectionName()
+                        + "/"
+                        + entry.getKey().taskType()))
+                .forEach(entry -> builder.append(metricName)
+                        .append("_sum")
+                        .append(labels(Map.of(
+                                "tenant", entry.getKey().tenantId(),
+                                "collection", entry.getKey().collectionName(),
+                                "task", entry.getKey().taskType()
+                        )))
+                        .append(' ')
+                        .append(entry.getValue().sum() / 1_000_000_000.0D)
+                        .append('\n'));
+
+        builder.append("# TYPE ").append(metricName).append("_count counter\n");
+        counts.entrySet().stream()
+                .filter(entry -> filter.test(entry.getKey()))
+                .sorted(Comparator.comparing(entry -> entry.getKey().tenantId()
+                        + "/"
+                        + entry.getKey().collectionName()
+                        + "/"
+                        + entry.getKey().taskType()))
+                .forEach(entry -> builder.append(metricName)
+                        .append("_count")
+                        .append(labels(Map.of(
+                                "tenant", entry.getKey().tenantId(),
+                                "collection", entry.getKey().collectionName(),
+                                "task", entry.getKey().taskType()
+                        )))
+                        .append(' ')
+                        .append(entry.getValue().sum())
+                        .append('\n'));
+    }
+
+    private static void appendTaskQueuedDuration(
+            StringBuilder builder,
+            String metricName,
+            ConcurrentHashMap<TaskMetricKey, LongAdder> sums,
+            ConcurrentHashMap<TaskMetricKey, LongAdder> counts,
+            Predicate<TaskMetricKey> filter
+    ) {
+        appendTaskDuration(builder, metricName, sums, counts, filter);
+    }
+
     private static void appendCollectionDuration(
             StringBuilder builder,
             String metricName,
@@ -428,6 +619,25 @@ final class MetricsRegistry implements EngineObserver {
                         )))
                         .append(' ')
                         .append(entry.getValue().sum())
+                        .append('\n'));
+    }
+
+    private static void appendRuntimeGauge(
+            StringBuilder builder,
+            String metricName,
+            List<CollectionRuntimeMetrics> runtimeMetrics,
+            ToLongFunction<CollectionRuntimeMetrics> valueFunction
+    ) {
+        builder.append("# TYPE ").append(metricName).append(" gauge\n");
+        runtimeMetrics.stream()
+                .sorted(Comparator.comparing(CollectionRuntimeMetrics::tenantId).thenComparing(CollectionRuntimeMetrics::collectionName))
+                .forEach(metric -> builder.append(metricName)
+                        .append(labels(Map.of(
+                                "tenant", metric.tenantId(),
+                                "collection", metric.collectionName()
+                        )))
+                        .append(' ')
+                        .append(valueFunction.applyAsLong(metric))
                         .append('\n'));
     }
 
@@ -470,5 +680,11 @@ final class MetricsRegistry implements EngineObserver {
     }
 
     private record ModeMetricKey(String tenantId, String collectionName, String mode) {
+    }
+
+    private record StageMetricKey(String tenantId, String collectionName, String stage) {
+    }
+
+    private record TaskMetricKey(String tenantId, String collectionName, String taskType) {
     }
 }

@@ -65,6 +65,65 @@ java --enable-preview `
 
 > 某些 JDK 26 build 可能不接受 `-XX:+ZGenerational`；如果启动时报错，移除该参数即可。
 
+### 3.3 使用配置文件启动
+
+当参数较多时，建议先生成 JSON 配置模板：
+
+```powershell
+java --enable-preview `
+  -jar anaxa-server\target\anaxa-server-1.4.jar `
+  --init-config=D:\anaxa-config\anaxa-config.json
+```
+
+之后用配置文件启动：
+
+```powershell
+java --enable-preview `
+  -jar anaxa-server\target\anaxa-server-1.4.jar `
+  --config=D:\anaxa-config\anaxa-config.json
+```
+
+命令行参数仍可覆盖配置文件中的同名设置，例如：
+
+```powershell
+java --enable-preview `
+  -jar anaxa-server\target\anaxa-server-1.4.jar `
+  --config=D:\anaxa-config\anaxa-config.json `
+  --port=30721 `
+  --max-concurrent-source-searches=6
+```
+
+配置文件示例：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 30720,
+  "dataDirectory": "D:\\anaxa-data",
+  "defaultFlushThresholdBytes": 67108864,
+  "apiKeys": ["prod-secret-1", "prod-secret-2"],
+  "apiKeyFile": "D:\\anaxa-config\\api-keys.json",
+  "rateLimitPerMinute": 6000,
+  "rateLimitBurst": 256,
+  "slowQueryThresholdMillis": 250,
+  "auditLogPath": "D:\\anaxa-data\\audit\\audit.log",
+  "backupDirectory": "D:\\anaxa-data\\backups",
+  "snapshotIntervalSeconds": 900,
+  "autoSnapshotRetentionPerCollection": 7,
+  "maxRequestBodyBytes": 268435456,
+  "maxConcurrentRequests": 1024,
+  "allowOpenAccess": false,
+  "webUiEnabled": true,
+  "engine": {
+    "maxConcurrentSourceSearches": 4,
+    "warmupYieldPollMillis": 2,
+    "foregroundSearchesPerSourceSearch": 16,
+    "minAdaptiveSourceSearches": 1,
+    "adaptiveRecoverySearches": 64
+  }
+}
+```
+
 ## 4. 启动参数
 
 | 参数 | 默认值 | 说明 |
@@ -86,6 +145,13 @@ java --enable-preview `
 | `--snapshot-retention-per-collection` | `7` | 每个 collection 自动 snapshot 保留份数 |
 | `--allow-open-access` | `false` | 是否允许无 API key 启动；生产必须保持 `false` |
 | `--web-ui-enabled` | `true` | 是否启用内置 WebUI；关闭后 `/ui` 返回 404 |
+| `--config` | 空 | 从 JSON 文件加载服务配置；命令行参数可覆盖文件值 |
+| `--init-config` | 空 | 生成 JSON 配置模板并退出 |
+| `--max-concurrent-source-searches` | `4` | 单次查询并发搜索的 source 上限 |
+| `--warmup-yield-poll-ms` | `2` | resident warmup 遇到前台查询时的让路轮询间隔 |
+| `--foreground-searches-per-source-search` | `16` | 自适应 backpressure 中，每多少个前台查询减少 1 个 source 并发额度 |
+| `--min-adaptive-source-searches` | `1` | 自适应 source 并发额度下限 |
+| `--adaptive-recovery-searches` | `64` | 连续多少次未触发 source/backpressure 后恢复 1 个 source 并发额度 |
 
 ## 5. 部署建议
 
@@ -127,6 +193,9 @@ java --enable-preview `
 - JSON、NDJSON 与 binary ingest 都受 `--max-request-body-bytes` 限制，超限返回 `413 Payload Too Large`
 - NDJSON / binary 是流式分批写入，超限前已经提交的批次不会自动回滚
 - `--max-concurrent-requests` 用于限制 HTTP 层并发处理数量，超限返回 `503` 并带 `Retry-After: 1`
+- `--max-concurrent-source-searches` 限制单次查询 fan-out，active sources 多于该值时分批搜索
+- `--foreground-searches-per-source-search` 和 `--min-adaptive-source-searches` 会在前台查询堆积时进一步降低单次查询 source 并发，保护 CPU 调度
+- `--warmup-yield-poll-ms` 控制后台 resident warmup 对前台查询让路的等待粒度
 - 生产环境建议在反向代理层同时设置 TLS、连接超时、读超时、请求头大小和请求体大小限制
 
 ### 5.6 WebUI

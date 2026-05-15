@@ -72,6 +72,7 @@ final class EngineCollection implements AutoCloseable {
     private final CollectionPaths paths;
     private final SegmentIndexSearcher searcher;
     private final EngineObserver observer;
+    private final EngineOptions options;
     private final AtomicLong sequenceGenerator;
     private final AtomicLong generationCounter;
     private final java.util.concurrent.ConcurrentHashMap<String, EntryState> latestStates;
@@ -82,6 +83,9 @@ final class EngineCollection implements AutoCloseable {
     private final AtomicBoolean compactionInProgress;
     private final AtomicBoolean closed;
     private final AtomicInteger activeSearches;
+    private final AtomicInteger activeForegroundSearches;
+    private final AtomicInteger adaptiveSourceSearchLimit;
+    private final AtomicInteger quietSearchesSinceThrottle;
     private final AtomicLong liveVectorCount;
     private final AtomicLong tombstoneCount;
     private final AtomicLong staleVersionDebt;
@@ -103,6 +107,7 @@ final class EngineCollection implements AutoCloseable {
             CollectionPaths paths,
             SegmentIndexSearcher searcher,
             EngineObserver observer,
+            EngineOptions options,
             AtomicLong sequenceGenerator,
             AtomicLong generationCounter,
             java.util.concurrent.ConcurrentHashMap<String, EntryState> latestStates,
@@ -112,6 +117,7 @@ final class EngineCollection implements AutoCloseable {
         this.paths = paths;
         this.searcher = searcher;
         this.observer = observer;
+        this.options = Objects.requireNonNull(options, "options");
         this.sequenceGenerator = sequenceGenerator;
         this.generationCounter = generationCounter;
         this.latestStates = latestStates;
@@ -122,6 +128,9 @@ final class EngineCollection implements AutoCloseable {
         this.compactionInProgress = new AtomicBoolean(false);
         this.closed = new AtomicBoolean(false);
         this.activeSearches = new AtomicInteger(0);
+        this.activeForegroundSearches = new AtomicInteger(0);
+        this.adaptiveSourceSearchLimit = new AtomicInteger(options.maxConcurrentSourceSearches());
+        this.quietSearchesSinceThrottle = new AtomicInteger(0);
         long initialLiveVectorCount = latestStates.values().stream().filter(state -> !state.tombstone()).count();
         long initialTombstoneCount = latestStates.size() - initialLiveVectorCount;
         this.liveVectorCount = new AtomicLong(initialLiveVectorCount);
@@ -141,7 +150,8 @@ final class EngineCollection implements AutoCloseable {
             CollectionDefinition definition,
             CollectionPaths paths,
             SegmentIndexSearcher searcher,
-            EngineObserver observer
+            EngineObserver observer,
+            EngineOptions options
     )
             throws IOException {
         Files.createDirectories(paths.root());
@@ -153,6 +163,7 @@ final class EngineCollection implements AutoCloseable {
                 paths,
                 searcher,
                 observer,
+                options,
                 new AtomicLong(0L),
                 new AtomicLong(1L),
                 new java.util.concurrent.ConcurrentHashMap<>(),
@@ -167,7 +178,8 @@ final class EngineCollection implements AutoCloseable {
             CollectionDefinition definition,
             CollectionPaths paths,
             SegmentIndexSearcher searcher,
-            EngineObserver observer
+            EngineObserver observer,
+            EngineOptions options
     )
             throws IOException {
         paths.ensureDirectories();
@@ -231,6 +243,7 @@ final class EngineCollection implements AutoCloseable {
                 paths,
                 searcher,
                 observer,
+                options,
                 new AtomicLong(maxSequence),
                 new AtomicLong(activeGeneration),
                 latestStates,
@@ -285,6 +298,22 @@ final class EngineCollection implements AutoCloseable {
 
     CollectionDefinition definition() {
         return definition;
+    }
+
+    CollectionRuntimeMetrics runtimeMetrics() {
+        return new CollectionRuntimeMetrics(
+                definition.tenantId(),
+                definition.name(),
+                activeSearches.get(),
+                activeForegroundSearches.get(),
+                pendingFlushMemTables.size(),
+                queuedWarmTasks.get(),
+                adaptiveSourceSearchLimit.get(),
+                residentSourceBytes.get(),
+                residentSources.size(),
+                flushInProgress.get(),
+                compactionInProgress.get()
+        );
     }
 
     long estimateAdditionalLiveVectors(List<String> ids) {
@@ -469,13 +498,20 @@ final class EngineCollection implements AutoCloseable {
                         0L,
                         0L,
                         0L,
+                        0,
+                        false,
                         true,
                         cached.hits().size(),
-                        System.nanoTime() - startedAtNanos
+                        System.nanoTime() - startedAtNanos,
+                        0L,
+                        0L,
+                        0L,
+                        0L
                 ));
                 return cached;
             }
 
+            long sourceSelectionStartedAtNanos = System.nanoTime();
             List<SearchableVectors> sources = new ArrayList<>(1 + pendingFlushMemTables.size() + segments.size());
             stateLock.readLock().lock();
             try {
@@ -490,26 +526,39 @@ final class EngineCollection implements AutoCloseable {
                     .filter(source -> source.size() > 0)
                     .toList();
             activeSources.forEach(source -> touchResidentSource(source.sourceId()));
+            long sourceSelectionNanos = System.nanoTime() - sourceSelectionStartedAtNanos;
 
             try {
+                long sourceSearchStartedAtNanos = System.nanoTime();
                 ArrayList<SourceSearchResult> partialResults = new ArrayList<>(activeSources.size());
+                int sourceBatchCount = 0;
+                int sourceSearchLimit = currentSourceSearchLimit();
+                boolean sourceThrottled = activeSources.size() > sourceSearchLimit;
                 if (activeSources.size() == 1) {
                     partialResults.add(searcher.search(activeSources.getFirst(), request, this::isLiveEntry));
+                    sourceBatchCount = 1;
                 } else if (activeSources.size() > 1) {
-                    SearchableVectors inlineSource = selectInlineSource(activeSources);
-                    try (StructuredTaskScope<SourceSearchResult, List<SourceSearchResult>> scope = StructuredTaskScope.open(
-                            StructuredTaskScope.Joiner.<SourceSearchResult>allSuccessfulOrThrow())) {
-                        for (SearchableVectors source : activeSources) {
-                            if (source != inlineSource) {
-                                scope.fork(() -> searcher.search(source, request, this::isLiveEntry));
+                    for (int start = 0; start < activeSources.size(); start += sourceSearchLimit) {
+                        int end = Math.min(activeSources.size(), start + sourceSearchLimit);
+                        List<SearchableVectors> batch = activeSources.subList(start, end);
+                        SearchableVectors inlineSource = selectInlineSource(batch);
+                        try (StructuredTaskScope<SourceSearchResult, List<SourceSearchResult>> scope = StructuredTaskScope.open(
+                                StructuredTaskScope.Joiner.<SourceSearchResult>allSuccessfulOrThrow())) {
+                            for (SearchableVectors source : batch) {
+                                if (source != inlineSource) {
+                                    scope.fork(() -> searcher.search(source, request, this::isLiveEntry));
+                                }
                             }
+                            SourceSearchResult inlineResult = searcher.search(inlineSource, request, this::isLiveEntry);
+                            partialResults.addAll(scope.join());
+                            partialResults.add(inlineResult);
                         }
-                        SourceSearchResult inlineResult = searcher.search(inlineSource, request, this::isLiveEntry);
-                        partialResults.addAll(scope.join());
-                        partialResults.add(inlineResult);
+                        sourceBatchCount++;
                     }
                 }
+                long sourceSearchNanos = System.nanoTime() - sourceSearchStartedAtNanos;
 
+                long mergeStartedAtNanos = System.nanoTime();
                 TopKAccumulator accumulator = new TopKAccumulator(request.topK());
                 int exactSourceCount = 0;
                 int approximateSourceCount = 0;
@@ -520,9 +569,11 @@ final class EngineCollection implements AutoCloseable {
                 long graphVisitedCount = 0L;
                 long sourceIndexCacheHitCount = 0L;
                 long sourceIndexCacheMissCount = 0L;
+                long totalSourceVectors = 0L;
 
                 for (SourceSearchResult partialResult : partialResults) {
                     partialResult.hits().forEach(accumulator::offer);
+                    totalSourceVectors += partialResult.metrics().totalVectors();
                     if (partialResult.metrics().mode() == SearchMode.EXACT) {
                         exactSourceCount++;
                     } else {
@@ -541,6 +592,7 @@ final class EngineCollection implements AutoCloseable {
                 }
                 SearchResponse response = new SearchResponse(accumulator.toSortedList());
                 queryCache.put(request, response);
+                long mergeNanos = System.nanoTime() - mergeStartedAtNanos;
                 observer.onSearchCompleted(new CollectionSearchMetrics(
                         definition.tenantId(),
                         definition.name(),
@@ -554,10 +606,17 @@ final class EngineCollection implements AutoCloseable {
                         graphVisitedCount,
                         sourceIndexCacheHitCount,
                         sourceIndexCacheMissCount,
+                        sourceBatchCount,
+                        sourceThrottled,
                         false,
                         response.hits().size(),
-                        System.nanoTime() - startedAtNanos
+                        System.nanoTime() - startedAtNanos,
+                        sourceSelectionNanos,
+                        sourceSearchNanos,
+                        mergeNanos,
+                        totalSourceVectors
                 ));
+                adjustAdaptiveSourceSearchLimit(sourceThrottled);
                 return response;
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
@@ -727,12 +786,14 @@ final class EngineCollection implements AutoCloseable {
             stateLock.writeLock().unlock();
         }
 
-        flushExecutor.submit(() -> flushFrozenMemTable(frozenMemTable, frozenWalPath));
+        long queuedAtNanos = System.nanoTime();
+        flushExecutor.submit(() -> flushFrozenMemTable(frozenMemTable, frozenWalPath, queuedAtNanos));
     }
 
-    private void flushFrozenMemTable(OffHeapMemTable frozenMemTable, Path frozenWalPath) {
+    private void flushFrozenMemTable(OffHeapMemTable frozenMemTable, Path frozenWalPath, long queuedAtNanos) {
         long startedAtNanos = System.nanoTime();
         long inputBytes = frozenMemTable.approximateBytes();
+        boolean success = false;
         try {
             ImmutableSegment segment = SegmentWriter.write(paths, definition, frozenMemTable);
             if (segment != null) {
@@ -760,6 +821,7 @@ final class EngineCollection implements AutoCloseable {
                     segment == null ? 0L : fileSize(segment.path()) + fileSize(segment.searchArtifactPath()),
                     System.nanoTime() - startedAtNanos
             ));
+            success = true;
             maybeScheduleCompaction();
         } catch (Exception exception) {
             backgroundFailure = new IllegalStateException(
@@ -767,6 +829,15 @@ final class EngineCollection implements AutoCloseable {
                     exception
             );
         } finally {
+            observer.onBackgroundTaskCompleted(new BackgroundTaskMetrics(
+                    definition.tenantId(),
+                    definition.name(),
+                    "flush",
+                    startedAtNanos - queuedAtNanos,
+                    0L,
+                    System.nanoTime() - startedAtNanos,
+                    success
+            ));
             flushInProgress.set(false);
             if (backgroundFailure == null) {
                 maybeScheduleFlush();
@@ -783,15 +854,28 @@ final class EngineCollection implements AutoCloseable {
             return;
         }
 
+        long queuedAtNanos = System.nanoTime();
         flushExecutor.submit(() -> {
+            long startedAtNanos = System.nanoTime();
+            boolean success = false;
             try {
                 compactSegments();
+                success = true;
             } catch (Exception exception) {
                 backgroundFailure = new IllegalStateException(
                         "Asynchronous compaction failed for collection " + definition.name() + " at " + Instant.now(),
                         exception
                 );
             } finally {
+                observer.onBackgroundTaskCompleted(new BackgroundTaskMetrics(
+                        definition.tenantId(),
+                        definition.name(),
+                        "compaction",
+                        startedAtNanos - queuedAtNanos,
+                        0L,
+                        System.nanoTime() - startedAtNanos,
+                        success
+                ));
                 compactionInProgress.set(false);
                 if (backgroundFailure == null) {
                     maybeScheduleCompaction();
@@ -1092,14 +1176,69 @@ final class EngineCollection implements AutoCloseable {
 
     private void beginSearch() {
         activeSearches.incrementAndGet();
+        activeForegroundSearches.incrementAndGet();
     }
 
     private void endSearch() {
+        activeForegroundSearches.decrementAndGet();
+        decrementActiveSearches();
+    }
+
+    private void beginBackgroundSearch() {
+        activeSearches.incrementAndGet();
+    }
+
+    private void endBackgroundSearch() {
+        decrementActiveSearches();
+    }
+
+    private void decrementActiveSearches() {
         if (activeSearches.decrementAndGet() == 0) {
             synchronized (searchLifecycleMonitor) {
                 searchLifecycleMonitor.notifyAll();
             }
         }
+    }
+
+    private long waitForForegroundSearches() {
+        long startedAtNanos = System.nanoTime();
+        boolean yielded = false;
+        while (activeForegroundSearches.get() > 0 && !closed.get() && backgroundFailure == null) {
+            yielded = true;
+            try {
+                Thread.sleep(options.warmupYieldPollMillis());
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for foreground searches on collection " + definition.name(), exception);
+            }
+        }
+        long elapsedNanos = System.nanoTime() - startedAtNanos;
+        if (yielded) {
+            reduceAdaptiveSourceSearchLimit();
+        }
+        return elapsedNanos;
+    }
+
+    private int currentSourceSearchLimit() {
+        int foregroundLimit = options.sourceSearchLimit(activeForegroundSearches.get());
+        int adaptiveLimit = adaptiveSourceSearchLimit.get();
+        return Math.max(options.minAdaptiveSourceSearches(), Math.min(foregroundLimit, adaptiveLimit));
+    }
+
+    private void adjustAdaptiveSourceSearchLimit(boolean sourceThrottled) {
+        if (sourceThrottled || activeForegroundSearches.get() > options.foregroundSearchesPerSourceSearch()) {
+            reduceAdaptiveSourceSearchLimit();
+            return;
+        }
+        if (quietSearchesSinceThrottle.incrementAndGet() >= options.adaptiveRecoverySearches()) {
+            quietSearchesSinceThrottle.set(0);
+            adaptiveSourceSearchLimit.updateAndGet(current -> Math.min(options.maxConcurrentSourceSearches(), current + 1));
+        }
+    }
+
+    private void reduceAdaptiveSourceSearchLimit() {
+        quietSearchesSinceThrottle.set(0);
+        adaptiveSourceSearchLimit.updateAndGet(current -> Math.max(options.minAdaptiveSourceSearches(), current - 1));
     }
 
     private void rewriteActiveWalSnapshot() throws IOException {
@@ -1213,13 +1352,27 @@ final class EngineCollection implements AutoCloseable {
             return;
         }
         try {
+            long queuedAtNanos = System.nanoTime();
             prefetchExecutor.submit(() -> {
-                beginSearch();
+                long yieldedNanos = waitForForegroundSearches();
+                long startedAtNanos = System.nanoTime();
+                boolean success = false;
+                beginBackgroundSearch();
                 try {
                     warmSourceBestEffort(source);
+                    success = true;
                 } finally {
-                    endSearch();
+                    endBackgroundSearch();
                     queuedWarmTasks.decrementAndGet();
+                    observer.onBackgroundTaskCompleted(new BackgroundTaskMetrics(
+                            definition.tenantId(),
+                            definition.name(),
+                            "warmup",
+                            startedAtNanos - queuedAtNanos,
+                            yieldedNanos,
+                            System.nanoTime() - startedAtNanos,
+                            success
+                    ));
                 }
             });
         } catch (RejectedExecutionException exception) {
@@ -1328,6 +1481,9 @@ final class EngineCollection implements AutoCloseable {
         } catch (NoSuchFileException exception) {
             return 0L;
         } catch (IOException exception) {
+            if (!Files.exists(path)) {
+                return 0L;
+            }
             throw new UncheckedIOException("Failed to read file size for " + path, exception);
         }
     }

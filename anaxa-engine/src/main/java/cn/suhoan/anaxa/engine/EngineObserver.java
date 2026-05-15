@@ -12,4 +12,7 @@ public interface EngineObserver {
 
     default void onSearchCompleted(CollectionSearchMetrics metrics) {
     }
+
+    default void onBackgroundTaskCompleted(BackgroundTaskMetrics metrics) {
+    }
 }

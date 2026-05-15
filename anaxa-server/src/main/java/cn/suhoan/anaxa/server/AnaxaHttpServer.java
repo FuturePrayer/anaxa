@@ -70,7 +70,7 @@ public final class AnaxaHttpServer implements AutoCloseable {
     }
 
     private AnaxaHttpServer(MetricsRegistry metrics, ServerConfig config) throws IOException {
-        this(new VectorDatabaseEngine(config.dataDirectory(), config.defaultFlushThresholdBytes(), metrics), config, metrics);
+        this(new VectorDatabaseEngine(config.dataDirectory(), config.defaultFlushThresholdBytes(), config.engineOptions(), metrics), config, metrics);
     }
 
     AnaxaHttpServer(VectorDatabaseEngine engine, ServerConfig config) throws IOException {

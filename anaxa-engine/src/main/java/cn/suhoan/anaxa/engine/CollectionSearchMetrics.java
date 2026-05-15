@@ -13,8 +13,14 @@ public record CollectionSearchMetrics(
         long graphVisitedCount,
         long sourceIndexCacheHitCount,
         long sourceIndexCacheMissCount,
+        int sourceBatchCount,
+        boolean sourceThrottled,
         boolean queryCacheHit,
         int resultCount,
-        long durationNanos
+        long durationNanos,
+        long sourceSelectionNanos,
+        long sourceSearchNanos,
+        long mergeNanos,
+        long totalSourceVectors
 ) {
 }

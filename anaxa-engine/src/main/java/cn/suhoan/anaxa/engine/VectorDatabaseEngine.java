@@ -39,29 +39,41 @@ public final class VectorDatabaseEngine implements AutoCloseable {
     private final long defaultFlushThresholdBytes;
     private final SegmentIndexSearcher searcher;
     private final EngineObserver observer;
+    private final EngineOptions options;
     private final ConcurrentHashMap<CollectionKey, EngineCollection> collections;
 
     public VectorDatabaseEngine(Path dataDirectory) throws IOException {
-        this(dataDirectory, DEFAULT_FLUSH_THRESHOLD_BYTES, new HnswPqSegmentIndexSearcher(), EngineObserver.NO_OP);
+        this(dataDirectory, DEFAULT_FLUSH_THRESHOLD_BYTES, EngineOptions.defaults(), EngineObserver.NO_OP);
     }
 
     public VectorDatabaseEngine(Path dataDirectory, long defaultFlushThresholdBytes) throws IOException {
-        this(dataDirectory, defaultFlushThresholdBytes, new HnswPqSegmentIndexSearcher(), EngineObserver.NO_OP);
+        this(dataDirectory, defaultFlushThresholdBytes, EngineOptions.defaults(), EngineObserver.NO_OP);
     }
 
     public VectorDatabaseEngine(Path dataDirectory, long defaultFlushThresholdBytes, EngineObserver observer) throws IOException {
-        this(dataDirectory, defaultFlushThresholdBytes, new HnswPqSegmentIndexSearcher(), observer);
+        this(dataDirectory, defaultFlushThresholdBytes, EngineOptions.defaults(), observer);
+    }
+
+    public VectorDatabaseEngine(
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            EngineOptions options,
+            EngineObserver observer
+    ) throws IOException {
+        this(dataDirectory, defaultFlushThresholdBytes, new HnswPqSegmentIndexSearcher(), options, observer);
     }
 
     VectorDatabaseEngine(
             Path dataDirectory,
             long defaultFlushThresholdBytes,
             SegmentIndexSearcher searcher,
+            EngineOptions options,
             EngineObserver observer
     ) throws IOException {
         this.dataDirectory = Objects.requireNonNull(dataDirectory, "dataDirectory");
         this.defaultFlushThresholdBytes = defaultFlushThresholdBytes;
         this.searcher = Objects.requireNonNull(searcher, "searcher");
+        this.options = Objects.requireNonNull(options, "options");
         this.observer = Objects.requireNonNull(observer, "observer");
         this.collections = new ConcurrentHashMap<>();
         Files.createDirectories(dataDirectory);
@@ -82,7 +94,7 @@ public final class VectorDatabaseEngine implements AutoCloseable {
 
         EngineCollection collection;
         try {
-            collection = EngineCollection.createNew(definition, paths, searcher, observer);
+            collection = EngineCollection.createNew(definition, paths, searcher, observer, options);
         } catch (IOException exception) {
             throw new UncheckedIOException(
                     "Failed to create collection " + definition.tenantId() + "/" + definition.name(),
@@ -231,7 +243,7 @@ public final class VectorDatabaseEngine implements AutoCloseable {
             copyDirectory(sourcePaths.root(), targetPaths.root());
             Files.write(targetPaths.metadataFile(), JsonSupport.writeBytes(restoredDefinition));
 
-            EngineCollection restored = EngineCollection.openExisting(restoredDefinition, targetPaths, searcher, observer);
+            EngineCollection restored = EngineCollection.openExisting(restoredDefinition, targetPaths, searcher, observer, options);
             EngineCollection existing = collections.putIfAbsent(key, restored);
             if (existing != null) {
                 restored.close();
@@ -302,6 +314,22 @@ public final class VectorDatabaseEngine implements AutoCloseable {
                 .toList();
     }
 
+    public List<CollectionRuntimeMetrics> runtimeMetrics() {
+        return collections.values().stream()
+                .map(EngineCollection::runtimeMetrics)
+                .sorted(Comparator.comparing(CollectionRuntimeMetrics::tenantId).thenComparing(CollectionRuntimeMetrics::collectionName))
+                .toList();
+    }
+
+    public List<CollectionRuntimeMetrics> runtimeMetrics(String tenantId) {
+        String normalizedTenantId = CollectionDefinition.normalizeTenantId(tenantId);
+        return collections.entrySet().stream()
+                .filter(entry -> entry.getKey().tenantId().equals(normalizedTenantId))
+                .map(entry -> entry.getValue().runtimeMetrics())
+                .sorted(Comparator.comparing(CollectionRuntimeMetrics::collectionName))
+                .toList();
+    }
+
     @Override
     public void close() {
         RuntimeException failure = null;
@@ -363,7 +391,7 @@ public final class VectorDatabaseEngine implements AutoCloseable {
                 );
                 collections.put(
                         new CollectionKey(normalized.tenantId(), normalized.name()),
-                        EngineCollection.openExisting(normalized, CollectionPaths.of(dataDirectory, normalized.tenantId(), normalized.name()), searcher, observer)
+                        EngineCollection.openExisting(normalized, CollectionPaths.of(dataDirectory, normalized.tenantId(), normalized.name()), searcher, observer, options)
                 );
             }
         }
@@ -386,7 +414,7 @@ public final class VectorDatabaseEngine implements AutoCloseable {
                 );
                 collections.put(
                         new CollectionKey(normalized.tenantId(), normalized.name()),
-                        EngineCollection.openExisting(normalized, CollectionPaths.of(dataDirectory, normalized.tenantId(), normalized.name()), searcher, observer)
+                        EngineCollection.openExisting(normalized, CollectionPaths.of(dataDirectory, normalized.tenantId(), normalized.name()), searcher, observer, options)
                 );
             }
         }

@@ -1,10 +1,21 @@
 package cn.suhoan.anaxa.server;
 
+import java.nio.file.Path;
+
 public final class AnaxaServerMain {
     private AnaxaServerMain() {
     }
 
     public static void main(String[] args) throws Exception {
+        for (String arg : args) {
+            if (arg.startsWith("--init-config=")) {
+                Path path = Path.of(arg.substring(arg.indexOf('=') + 1));
+                ServerConfig.writeTemplate(path);
+                System.out.printf("Wrote AnaxaDB config template to %s%n", path.toAbsolutePath());
+                return;
+            }
+        }
+
         ServerConfig config = ServerConfig.fromArgs(args);
         AnaxaHttpServer server = new AnaxaHttpServer(config);
         Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(server::close));

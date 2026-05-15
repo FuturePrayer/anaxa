@@ -1,10 +1,17 @@
 package cn.suhoan.anaxa.server;
 
+import cn.suhoan.anaxa.common.json.JsonSupport;
+import cn.suhoan.anaxa.engine.EngineOptions;
 import cn.suhoan.anaxa.engine.VectorDatabaseEngine;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -25,7 +32,8 @@ public record ServerConfig(
         long maxRequestBodyBytes,
         int maxConcurrentRequests,
         boolean allowOpenAccess,
-        boolean webUiEnabled
+        boolean webUiEnabled,
+        EngineOptions engineOptions
 ) {
     public static final long DEFAULT_MAX_REQUEST_BODY_BYTES = 256L * 1024L * 1024L;
     public static final int DEFAULT_MAX_CONCURRENT_REQUESTS = 1_024;
@@ -48,7 +56,8 @@ public record ServerConfig(
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
                 false,
-                true
+                true,
+                EngineOptions.defaults()
         );
     }
 
@@ -70,7 +79,8 @@ public record ServerConfig(
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
                 true,
-                true
+                true,
+                EngineOptions.defaults()
         );
     }
 
@@ -100,7 +110,8 @@ public record ServerConfig(
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
                 false,
-                true
+                true,
+                EngineOptions.defaults()
         );
     }
 
@@ -134,7 +145,8 @@ public record ServerConfig(
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
                 false,
-                true
+                true,
+                EngineOptions.defaults()
         );
     }
 
@@ -170,7 +182,8 @@ public record ServerConfig(
                 DEFAULT_MAX_REQUEST_BODY_BYTES,
                 DEFAULT_MAX_CONCURRENT_REQUESTS,
                 false,
-                true
+                true,
+                EngineOptions.defaults()
         );
     }
 
@@ -208,7 +221,8 @@ public record ServerConfig(
                 maxRequestBodyBytes,
                 maxConcurrentRequests,
                 false,
-                true
+                true,
+                EngineOptions.defaults()
         );
     }
 
@@ -247,7 +261,49 @@ public record ServerConfig(
                 maxRequestBodyBytes,
                 maxConcurrentRequests,
                 allowOpenAccess,
-                true
+                true,
+                EngineOptions.defaults()
+        );
+    }
+
+    public ServerConfig(
+            String host,
+            int port,
+            Path dataDirectory,
+            long defaultFlushThresholdBytes,
+            Set<String> apiKeys,
+            Path apiKeyFile,
+            int rateLimitPerMinute,
+            int rateLimitBurst,
+            long slowQueryThresholdMillis,
+            Path auditLogPath,
+            Path backupDirectory,
+            long snapshotIntervalSeconds,
+            int autoSnapshotRetentionPerCollection,
+            long maxRequestBodyBytes,
+            int maxConcurrentRequests,
+            boolean allowOpenAccess,
+            boolean webUiEnabled
+    ) {
+        this(
+                host,
+                port,
+                dataDirectory,
+                defaultFlushThresholdBytes,
+                apiKeys,
+                apiKeyFile,
+                rateLimitPerMinute,
+                rateLimitBurst,
+                slowQueryThresholdMillis,
+                auditLogPath,
+                backupDirectory,
+                snapshotIntervalSeconds,
+                autoSnapshotRetentionPerCollection,
+                maxRequestBodyBytes,
+                maxConcurrentRequests,
+                allowOpenAccess,
+                webUiEnabled,
+                EngineOptions.defaults()
         );
     }
 
@@ -287,6 +343,7 @@ public record ServerConfig(
         if (maxConcurrentRequests <= 0) {
             throw new IllegalArgumentException("maxConcurrentRequests must be positive");
         }
+        engineOptions = Objects.requireNonNullElse(engineOptions, EngineOptions.defaults());
         if (!allowOpenAccess && apiKeys.isEmpty() && apiKeyFile == null) {
             throw new IllegalArgumentException(
                     "API keys are required unless --allow-open-access=true is explicitly set"
@@ -295,72 +352,149 @@ public record ServerConfig(
     }
 
     public static ServerConfig fromArgs(String[] args) {
-        String host = "0.0.0.0";
-        int port = 30720;
-        Path dataDirectory = Paths.get("data");
-        long flushThresholdBytes = VectorDatabaseEngine.DEFAULT_FLUSH_THRESHOLD_BYTES;
-        Set<String> apiKeys = Set.of();
-        Path apiKeyFile = null;
-        int rateLimitPerMinute = 6_000;
-        int rateLimitBurst = 256;
-        long slowQueryThresholdMillis = 250L;
-        Path auditLogPath = null;
-        Path backupDirectory = null;
-        long snapshotIntervalSeconds = 0L;
-        int autoSnapshotRetentionPerCollection = 7;
-        long maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES;
-        int maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS;
-        boolean allowOpenAccess = false;
-        boolean webUiEnabled = true;
-
+        Path configPath = null;
+        MutableConfig values = new MutableConfig();
         for (String arg : args) {
             if (!arg.startsWith("--") || !arg.contains("=")) {
                 throw new IllegalArgumentException("Arguments must use --key=value syntax: " + arg);
             }
-
             String key = arg.substring(2, arg.indexOf('='));
             String value = arg.substring(arg.indexOf('=') + 1);
-            switch (key) {
-                case "host" -> host = value;
-                case "port" -> port = Integer.parseInt(value);
-                case "data-dir" -> dataDirectory = Paths.get(value);
-                case "default-flush-threshold-bytes" -> flushThresholdBytes = Long.parseLong(value);
-                case "api-keys" -> apiKeys = parseApiKeys(value);
-                case "api-key-file" -> apiKeyFile = Paths.get(value);
-                case "rate-limit-per-minute" -> rateLimitPerMinute = Integer.parseInt(value);
-                case "rate-limit-burst" -> rateLimitBurst = Integer.parseInt(value);
-                case "slow-query-threshold-ms" -> slowQueryThresholdMillis = Long.parseLong(value);
-                case "audit-log" -> auditLogPath = Paths.get(value);
-                case "backup-dir" -> backupDirectory = Paths.get(value);
-                case "snapshot-interval-seconds" -> snapshotIntervalSeconds = Long.parseLong(value);
-                case "snapshot-retention-per-collection" -> autoSnapshotRetentionPerCollection = Integer.parseInt(value);
-                case "max-request-body-bytes" -> maxRequestBodyBytes = Long.parseLong(value);
-                case "max-concurrent-requests" -> maxConcurrentRequests = Integer.parseInt(value);
-                case "allow-open-access" -> allowOpenAccess = Boolean.parseBoolean(value);
-                case "web-ui-enabled" -> webUiEnabled = Boolean.parseBoolean(value);
-                default -> throw new IllegalArgumentException("Unknown argument: --" + key);
+            if ("config".equals(key)) {
+                configPath = Paths.get(value);
+                values = loadConfig(configPath);
+                break;
             }
         }
 
-        return new ServerConfig(
-                host,
-                port,
-                dataDirectory,
-                flushThresholdBytes,
-                apiKeys,
-                apiKeyFile,
-                rateLimitPerMinute,
-                rateLimitBurst,
-                slowQueryThresholdMillis,
-                auditLogPath,
-                backupDirectory,
-                snapshotIntervalSeconds,
-                autoSnapshotRetentionPerCollection,
-                maxRequestBodyBytes,
-                maxConcurrentRequests,
-                allowOpenAccess,
-                webUiEnabled
-        );
+        for (String arg : args) {
+            String key = arg.substring(2, arg.indexOf('='));
+            if (!"config".equals(key)) {
+                applyArg(values, arg);
+            }
+        }
+        return values.toServerConfig();
+    }
+
+    public static void writeTemplate(Path path) {
+        try {
+            Path parent = path.toAbsolutePath().getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Files.writeString(path, templateJson());
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to write config template to " + path, exception);
+        }
+    }
+
+    private static MutableConfig loadConfig(Path path) {
+        try {
+            Map<String, Object> root = JsonSupport.readMap(Files.readAllBytes(path));
+            MutableConfig values = new MutableConfig();
+            applyRoot(values, root);
+            Object engine = root.get("engine");
+            if (engine instanceof Map<?, ?> map) {
+                applyEngine(values, map);
+            }
+            return values;
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to read config file " + path, exception);
+        }
+    }
+
+    private static void applyArg(MutableConfig values, String arg) {
+        if (!arg.startsWith("--") || !arg.contains("=")) {
+            throw new IllegalArgumentException("Arguments must use --key=value syntax: " + arg);
+        }
+
+        String key = arg.substring(2, arg.indexOf('='));
+        String value = arg.substring(arg.indexOf('=') + 1);
+        switch (key) {
+            case "host" -> values.host = value;
+            case "port" -> values.port = Integer.parseInt(value);
+            case "data-dir" -> values.dataDirectory = Paths.get(value);
+            case "default-flush-threshold-bytes" -> values.flushThresholdBytes = Long.parseLong(value);
+            case "api-keys" -> values.apiKeys = parseApiKeys(value);
+            case "api-key-file" -> values.apiKeyFile = Paths.get(value);
+            case "rate-limit-per-minute" -> values.rateLimitPerMinute = Integer.parseInt(value);
+            case "rate-limit-burst" -> values.rateLimitBurst = Integer.parseInt(value);
+            case "slow-query-threshold-ms" -> values.slowQueryThresholdMillis = Long.parseLong(value);
+            case "audit-log" -> values.auditLogPath = Paths.get(value);
+            case "backup-dir" -> values.backupDirectory = Paths.get(value);
+            case "snapshot-interval-seconds" -> values.snapshotIntervalSeconds = Long.parseLong(value);
+            case "snapshot-retention-per-collection" -> values.autoSnapshotRetentionPerCollection = Integer.parseInt(value);
+            case "max-request-body-bytes" -> values.maxRequestBodyBytes = Long.parseLong(value);
+            case "max-concurrent-requests" -> values.maxConcurrentRequests = Integer.parseInt(value);
+            case "allow-open-access" -> values.allowOpenAccess = Boolean.parseBoolean(value);
+            case "web-ui-enabled" -> values.webUiEnabled = Boolean.parseBoolean(value);
+            case "max-concurrent-source-searches" -> values.maxConcurrentSourceSearches = Integer.parseInt(value);
+            case "warmup-yield-poll-ms" -> values.warmupYieldPollMillis = Long.parseLong(value);
+            case "foreground-searches-per-source-search" -> values.foregroundSearchesPerSourceSearch = Integer.parseInt(value);
+            case "min-adaptive-source-searches" -> values.minAdaptiveSourceSearches = Integer.parseInt(value);
+            case "adaptive-recovery-searches" -> values.adaptiveRecoverySearches = Integer.parseInt(value);
+            default -> throw new IllegalArgumentException("Unknown argument: --" + key);
+        }
+    }
+
+    private static void applyRoot(MutableConfig values, Map<String, Object> root) {
+        if (root.containsKey("host")) values.host = string(root, "host");
+        if (root.containsKey("port")) values.port = integer(root, "port");
+        if (root.containsKey("dataDirectory")) values.dataDirectory = Paths.get(string(root, "dataDirectory"));
+        if (root.containsKey("dataDir")) values.dataDirectory = Paths.get(string(root, "dataDir"));
+        if (root.containsKey("defaultFlushThresholdBytes")) values.flushThresholdBytes = longValue(root, "defaultFlushThresholdBytes");
+        if (root.containsKey("apiKeys")) values.apiKeys = parseApiKeys(root.get("apiKeys"));
+        if (root.containsKey("apiKeyFile")) values.apiKeyFile = pathOrNull(root, "apiKeyFile");
+        if (root.containsKey("rateLimitPerMinute")) values.rateLimitPerMinute = integer(root, "rateLimitPerMinute");
+        if (root.containsKey("rateLimitBurst")) values.rateLimitBurst = integer(root, "rateLimitBurst");
+        if (root.containsKey("slowQueryThresholdMillis")) values.slowQueryThresholdMillis = longValue(root, "slowQueryThresholdMillis");
+        if (root.containsKey("auditLogPath")) values.auditLogPath = pathOrNull(root, "auditLogPath");
+        if (root.containsKey("backupDirectory")) values.backupDirectory = pathOrNull(root, "backupDirectory");
+        if (root.containsKey("snapshotIntervalSeconds")) values.snapshotIntervalSeconds = longValue(root, "snapshotIntervalSeconds");
+        if (root.containsKey("autoSnapshotRetentionPerCollection")) values.autoSnapshotRetentionPerCollection = integer(root, "autoSnapshotRetentionPerCollection");
+        if (root.containsKey("maxRequestBodyBytes")) values.maxRequestBodyBytes = longValue(root, "maxRequestBodyBytes");
+        if (root.containsKey("maxConcurrentRequests")) values.maxConcurrentRequests = integer(root, "maxConcurrentRequests");
+        if (root.containsKey("allowOpenAccess")) values.allowOpenAccess = bool(root, "allowOpenAccess");
+        if (root.containsKey("webUiEnabled")) values.webUiEnabled = bool(root, "webUiEnabled");
+    }
+
+    private static void applyEngine(MutableConfig values, Map<?, ?> engine) {
+        if (engine.containsKey("maxConcurrentSourceSearches")) values.maxConcurrentSourceSearches = integer(engine, "maxConcurrentSourceSearches");
+        if (engine.containsKey("warmupYieldPollMillis")) values.warmupYieldPollMillis = longValue(engine, "warmupYieldPollMillis");
+        if (engine.containsKey("foregroundSearchesPerSourceSearch")) values.foregroundSearchesPerSourceSearch = integer(engine, "foregroundSearchesPerSourceSearch");
+        if (engine.containsKey("minAdaptiveSourceSearches")) values.minAdaptiveSourceSearches = integer(engine, "minAdaptiveSourceSearches");
+        if (engine.containsKey("adaptiveRecoverySearches")) values.adaptiveRecoverySearches = integer(engine, "adaptiveRecoverySearches");
+    }
+
+    private static String templateJson() {
+        return """
+                {
+                  "host": "0.0.0.0",
+                  "port": 30720,
+                  "dataDirectory": "data",
+                  "defaultFlushThresholdBytes": 67108864,
+                  "apiKeys": [],
+                  "apiKeyFile": null,
+                  "rateLimitPerMinute": 6000,
+                  "rateLimitBurst": 256,
+                  "slowQueryThresholdMillis": 250,
+                  "auditLogPath": null,
+                  "backupDirectory": null,
+                  "snapshotIntervalSeconds": 0,
+                  "autoSnapshotRetentionPerCollection": 7,
+                  "maxRequestBodyBytes": 268435456,
+                  "maxConcurrentRequests": 1024,
+                  "allowOpenAccess": false,
+                  "webUiEnabled": true,
+                  "engine": {
+                    "maxConcurrentSourceSearches": 4,
+                    "warmupYieldPollMillis": 2,
+                    "foregroundSearchesPerSourceSearch": 16,
+                    "minAdaptiveSourceSearches": 1,
+                    "adaptiveRecoverySearches": 64
+                  }
+                }
+                """;
     }
 
     private static Set<String> parseApiKeys(String value) {
@@ -371,5 +505,96 @@ public record ServerConfig(
                 .map(String::trim)
                 .filter(token -> !token.isEmpty())
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private static Set<String> parseApiKeys(Object value) {
+        if (value instanceof List<?> list) {
+            return list.stream()
+                    .filter(Objects::nonNull)
+                    .map(Object::toString)
+                    .map(String::trim)
+                    .filter(token -> !token.isEmpty())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
+        return parseApiKeys(value == null ? "" : value.toString());
+    }
+
+    private static String string(Map<?, ?> values, String key) {
+        Object value = values.get(key);
+        return value == null ? null : value.toString();
+    }
+
+    private static Path pathOrNull(Map<?, ?> values, String key) {
+        String value = string(values, key);
+        return value == null || value.isBlank() ? null : Paths.get(value);
+    }
+
+    private static int integer(Map<?, ?> values, String key) {
+        Object value = values.get(key);
+        return value instanceof Number number ? number.intValue() : Integer.parseInt(value.toString());
+    }
+
+    private static long longValue(Map<?, ?> values, String key) {
+        Object value = values.get(key);
+        return value instanceof Number number ? number.longValue() : Long.parseLong(value.toString());
+    }
+
+    private static boolean bool(Map<?, ?> values, String key) {
+        Object value = values.get(key);
+        return value instanceof Boolean bool ? bool : Boolean.parseBoolean(value.toString());
+    }
+
+    private static final class MutableConfig {
+        private String host = "0.0.0.0";
+        private int port = 30720;
+        private Path dataDirectory = Paths.get("data");
+        private long flushThresholdBytes = VectorDatabaseEngine.DEFAULT_FLUSH_THRESHOLD_BYTES;
+        private Set<String> apiKeys = Set.of();
+        private Path apiKeyFile;
+        private int rateLimitPerMinute = 6_000;
+        private int rateLimitBurst = 256;
+        private long slowQueryThresholdMillis = 250L;
+        private Path auditLogPath;
+        private Path backupDirectory;
+        private long snapshotIntervalSeconds;
+        private int autoSnapshotRetentionPerCollection = 7;
+        private long maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES;
+        private int maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS;
+        private boolean allowOpenAccess;
+        private boolean webUiEnabled = true;
+        private Integer maxConcurrentSourceSearches;
+        private Long warmupYieldPollMillis;
+        private Integer foregroundSearchesPerSourceSearch;
+        private Integer minAdaptiveSourceSearches;
+        private Integer adaptiveRecoverySearches;
+
+        private ServerConfig toServerConfig() {
+            return new ServerConfig(
+                    host,
+                    port,
+                    dataDirectory,
+                    flushThresholdBytes,
+                    apiKeys,
+                    apiKeyFile,
+                    rateLimitPerMinute,
+                    rateLimitBurst,
+                    slowQueryThresholdMillis,
+                    auditLogPath,
+                    backupDirectory,
+                    snapshotIntervalSeconds,
+                    autoSnapshotRetentionPerCollection,
+                    maxRequestBodyBytes,
+                    maxConcurrentRequests,
+                    allowOpenAccess,
+                    webUiEnabled,
+                    EngineOptions.ofNullable(
+                            maxConcurrentSourceSearches,
+                            warmupYieldPollMillis,
+                            foregroundSearchesPerSourceSearch,
+                            minAdaptiveSourceSearches,
+                            adaptiveRecoverySearches
+                    )
+            );
+        }
     }
 }

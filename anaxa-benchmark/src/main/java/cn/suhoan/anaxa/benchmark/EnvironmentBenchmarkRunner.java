@@ -164,6 +164,7 @@ public final class EnvironmentBenchmarkRunner {
         SearchPhaseResult warmup = runSearchPhase(client, collectionName, scenario, scenario.warmupRequests(), "warmup");
         SearchPhaseResult measured = runSearchPhase(client, collectionName, scenario, scenario.searchRequests(), "measured-search");
         CollectionStats finalStats = client.stats(collectionName);
+        MetricsSnapshot metricsSnapshot = metricsSnapshot(client, collectionName);
 
         return new ScenarioResult(
                 scenario,
@@ -174,8 +175,38 @@ public final class EnvironmentBenchmarkRunner {
                 preparedStats,
                 warmup,
                 measured,
-                finalStats
+                finalStats,
+                metricsSnapshot
         );
+    }
+
+    private MetricsSnapshot metricsSnapshot(BenchmarkHttpClient client, String collectionName) {
+        try {
+            HttpResponsePayload response = client.metrics();
+            if (response.statusCode() != 200) {
+                return new MetricsSnapshot(false, List.of("metrics_unavailable_status=" + response.statusCode()));
+            }
+            List<String> lines = response.body()
+                    .lines()
+                    .filter(line -> line.contains("collection=\"" + collectionName + "\""))
+                    .filter(EnvironmentBenchmarkRunner::isBaselineMetric)
+                    .sorted()
+                    .toList();
+            return new MetricsSnapshot(true, lines);
+        } catch (Exception exception) {
+            return new MetricsSnapshot(false, List.of("metrics_unavailable_exception=" + exception.getClass().getSimpleName()));
+        }
+    }
+
+    private static boolean isBaselineMetric(String line) {
+        return line.startsWith("anaxa_search_")
+                || line.startsWith("anaxa_engine_active_searches")
+                || line.startsWith("anaxa_engine_pending_flush_memtables")
+                || line.startsWith("anaxa_engine_queued_warm_tasks")
+                || line.startsWith("anaxa_engine_resident_")
+                || line.startsWith("anaxa_engine_flush_in_progress")
+                || line.startsWith("anaxa_engine_compaction_in_progress")
+                || line.startsWith("anaxa_background_");
     }
 
     private SearchPhaseResult runSearchPhase(
@@ -411,6 +442,7 @@ public final class EnvironmentBenchmarkRunner {
                 appendPhase(builder, result.measured());
                 builder.append("  segments:           ").append(result.finalStats().segmentCount()).append('\n');
                 builder.append("  storage_bytes:      ").append(result.finalStats().storageBytes()).append('\n');
+                appendMetricsSnapshot(builder, result.metricsSnapshot());
             }
 
             builder.append('\n').append("[summary]\n");
@@ -453,6 +485,17 @@ public final class EnvironmentBenchmarkRunner {
                 }
             }
             return builder.toString();
+        }
+
+        private static void appendMetricsSnapshot(StringBuilder builder, MetricsSnapshot metricsSnapshot) {
+            builder.append("  metrics_available:  ").append(metricsSnapshot.available()).append('\n');
+            if (metricsSnapshot.lines().isEmpty()) {
+                return;
+            }
+            builder.append("  metrics_snapshot:\n");
+            for (String line : metricsSnapshot.lines()) {
+                builder.append("    ").append(line).append('\n');
+            }
         }
 
         private static void appendPhase(StringBuilder builder, SearchPhaseResult phase) {
@@ -576,7 +619,14 @@ public final class EnvironmentBenchmarkRunner {
             CollectionStats preparedStats,
             SearchPhaseResult warmup,
             SearchPhaseResult measured,
-            CollectionStats finalStats
+            CollectionStats finalStats,
+            MetricsSnapshot metricsSnapshot
+    ) {
+    }
+
+    public record MetricsSnapshot(
+            boolean available,
+            List<String> lines
     ) {
     }
 
@@ -689,6 +739,10 @@ public final class EnvironmentBenchmarkRunner {
                 throw new IllegalStateException("Stats failed: HTTP " + response.statusCode() + " " + response.body());
             }
             return JsonSupport.mapper().readValue(response.body(), CollectionStats.class);
+        }
+
+        private HttpResponsePayload metrics() throws Exception {
+            return request("GET", "/metrics", null);
         }
 
         private HttpResponsePayload request(String method, String path, Object payload) throws Exception {
