@@ -152,7 +152,7 @@ SDK 模块基于 JDK `HttpClient` 封装 HTTP API，提供底层 API 调用和�
 <dependency>
   <groupId>cn.suhoan</groupId>
   <artifactId>anaxa-sdk</artifactId>
-  <version>1.5</version>
+  <version>1.6</version>
 </dependency>
 ```
 

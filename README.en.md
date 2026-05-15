@@ -152,7 +152,7 @@ The SDK module wraps the HTTP API with JDK `HttpClient` and provides low-level A
 <dependency>
   <groupId>cn.suhoan</groupId>
   <artifactId>anaxa-sdk</artifactId>
-  <version>1.5</version>
+  <version>1.6</version>
 </dependency>
 ```
 

@@ -561,7 +561,10 @@ class VectorDatabaseEngineTest {
             waitFor(() -> engine.stats("docs").segmentCount() == 1, "segment flush did not complete");
         }
 
-        Path segment = Files.list(dataDir.resolve("docs").resolve("segments")).findFirst().orElseThrow();
+        Path segment = Files.list(dataDir.resolve("docs").resolve("segments"))
+                .filter(path -> path.getFileName().toString().endsWith(".seg"))
+                .findFirst()
+                .orElseThrow();
         byte[] bytes = Files.readAllBytes(segment);
         bytes[bytes.length - 1] ^= 0x01;
         Files.write(segment, bytes, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
