@@ -18,7 +18,7 @@
   <dependency>
     <groupId>cn.suhoan</groupId>
     <artifactId>anaxa-sdk</artifactId>
-    <version>1.4</version>
+    <version>1.5</version>
   </dependency>
 
   <!-- SDK 只依赖 slf4j-api，日志实现由接入方自行提供 -->

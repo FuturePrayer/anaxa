@@ -82,9 +82,22 @@ jobs:
           fi
 
           ghcr_image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          private_image=""
-          if [[ -n "${PRIVATE_REGISTRY}" && -n "${PRIVATE_REGISTRY_NAMESPACE}" ]]; then
-            private_image="${PRIVATE_REGISTRY}/${PRIVATE_REGISTRY_NAMESPACE}/anaxa"
+          image_tags="$(printf '%s\n%s' "${ghcr_image}:${project_version}" "${ghcr_image}:latest")"
+
+          private_registry="$(echo "${PRIVATE_REGISTRY}" | xargs)"
+          private_namespace="$(echo "${PRIVATE_REGISTRY_NAMESPACE}" | xargs)"
+          private_username="$(echo "${PRIVATE_REGISTRY_USERNAME}" | xargs)"
+          private_password="$(echo "${PRIVATE_REGISTRY_PASSWORD}" | xargs)"
+          private_ready="false"
+          if [[ -n "${private_registry}" && -n "${private_namespace}" && -n "${private_username}" && -n "${private_password}" ]]; then
+            private_ready="true"
+            private_registry="${private_registry%/}"
+            private_namespace="${private_namespace#/}"
+            private_namespace="${private_namespace%/}"
+            private_image="${private_registry}/${private_namespace}/anaxa"
+            image_tags="$(printf '%s\n%s\n%s' "${image_tags}" "${private_image}:${project_version}" "${private_image}:latest")"
+          else
+            echo "Private registry secrets are incomplete; only GHCR image will be published."
           fi
 
           {
@@ -92,7 +105,11 @@ jobs:
             echo "version=${project_version}"
             echo "tag=${tag}"
             echo "ghcr_image=${ghcr_image}"
-            echo "private_image=${private_image}"
+            echo "private_registry=${private_registry}"
+            echo "private_ready=${private_ready}"
+            echo "image_tags<<EOF"
+            echo "${image_tags}"
+            echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
@@ -108,47 +125,28 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to private registry
-        if: steps.release.outputs.publish == 'true' && env.PRIVATE_REGISTRY != '' && env.PRIVATE_REGISTRY_USERNAME != '' && env.PRIVATE_REGISTRY_PASSWORD != ''
+        if: steps.release.outputs.publish == 'true' && steps.release.outputs.private_ready == 'true'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.PRIVATE_REGISTRY }}
+          registry: ${{ steps.release.outputs.private_registry }}
           username: ${{ env.PRIVATE_REGISTRY_USERNAME }}
           password: ${{ env.PRIVATE_REGISTRY_PASSWORD }}
 
-      - name: Build and push GHCR image
+      - name: Build and push Docker image
         if: steps.release.outputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          push: true
-          tags: |
-            ${{ steps.release.outputs.ghcr_image }}:${{ steps.release.outputs.version }}
-            ${{ steps.release.outputs.ghcr_image }}:latest
+          outputs: type=image,push=true,oci-mediatypes=false
+          tags: ${{ steps.release.outputs.image_tags }}
           labels: |
             org.opencontainers.image.title=AnaxaDB
             org.opencontainers.image.description=Standalone vector database built on modern Java
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.release.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push private image
-        if: steps.release.outputs.publish == 'true' && steps.release.outputs.private_image != '' && env.PRIVATE_REGISTRY != '' && env.PRIVATE_REGISTRY_USERNAME != '' && env.PRIVATE_REGISTRY_PASSWORD != ''
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: |
-            ${{ steps.release.outputs.private_image }}:${{ steps.release.outputs.version }}
-            ${{ steps.release.outputs.private_image }}:latest
-          labels: |
-            org.opencontainers.image.title=AnaxaDB
-            org.opencontainers.image.description=Standalone vector database built on modern Java
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -3,6 +3,8 @@ package cn.suhoan.anaxa.index;
 import cn.suhoan.anaxa.common.model.MetricType;
 import cn.suhoan.anaxa.common.model.SearchHit;
 import cn.suhoan.anaxa.common.model.SearchRequest;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -27,9 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Random;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiPredicate;
 
 public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
@@ -53,15 +53,14 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
     private static final long QUERY_PREFETCH_CEILING_BYTES = 64L * 1024L * 1024L;
     private static final long APPROXIMATE_PREFETCH_CEILING_BYTES = 32L * 1024L * 1024L;
     private static final int ARTIFACT_MAGIC = 0x414E4E31;
-    private static final int ARTIFACT_VERSION = 2;
+    private static final int ARTIFACT_VERSION = 3;
     private static final int ARTIFACT_FLAG_QUANTIZER = 1;
     private static final int ARTIFACT_FLAG_GRAPH = 1 << 1;
     private static final ValueLayout.OfFloat FLOAT_LAYOUT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
 
-    private final ConcurrentHashMap<String, CacheEntry> cache;
+    private final Cache<String, CacheEntry> cache;
     private final long cacheBudgetBytes;
     private final int cacheEntryLimit;
-    private final AtomicLong cachedBytes;
 
     public HnswPqSegmentIndexSearcher() {
         this(DEFAULT_CACHE_BUDGET_BYTES, DEFAULT_CACHE_ENTRY_LIMIT);
@@ -74,10 +73,16 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
         if (cacheEntryLimit <= 0) {
             throw new IllegalArgumentException("cacheEntryLimit must be positive");
         }
-        this.cache = new ConcurrentHashMap<>();
         this.cacheBudgetBytes = cacheBudgetBytes;
         this.cacheEntryLimit = cacheEntryLimit;
-        this.cachedBytes = new AtomicLong();
+        long minimumEntryWeight = Math.max(1L, (cacheBudgetBytes + cacheEntryLimit - 1L) / cacheEntryLimit);
+        this.cache = Caffeine.newBuilder()
+                .maximumWeight(cacheBudgetBytes)
+                .weigher((String ignored, CacheEntry entry) -> saturatedWeight(Math.max(
+                        minimumEntryWeight,
+                        entry.index().approximateBytes()
+                )))
+                .build();
     }
 
     @Override
@@ -94,16 +99,14 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
 
     @Override
     public void evict(String sourceId) {
-        CacheEntry removed = cache.remove(sourceId);
-        if (removed != null) {
-            cachedBytes.addAndGet(-removed.index().approximateBytes());
-        }
+        cache.invalidate(sourceId);
+        cache.cleanUp();
     }
 
     @Override
     public void close() {
-        cache.clear();
-        cachedBytes.set(0L);
+        cache.invalidateAll();
+        cache.cleanUp();
     }
 
     private record CachedSourceIndex(
@@ -288,7 +291,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             float[] query = request.vector();
             float queryNorm = metric == MetricType.COSINE ? VectorMetricScorer.norm(query) : 0.0F;
             PayloadFilterPlan filterPlan = PayloadFilterPlan.compile(request.filter(), payloadIndex, payloadColumnStore);
-            BitSet filtered = filterPlan.candidateOrdinals();
+            CandidateOrdinals filtered = filterPlan.candidateOrdinals();
             int filterCandidateCount = filtered == null ? vectors.size() : filtered.cardinality();
             if (filtered != null && filtered.isEmpty()) {
                 return new SourceSearchResult(
@@ -324,7 +327,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
             }
 
             QueryLookup lookup = quantizer.lookup(query, metric, queryNorm);
-            GraphSearchResult graphSearchResult = graph.search(lookup, filtered, searchPlan.efSearch());
+            GraphSearchResult graphSearchResult = graph.search(lookup, filtered == null ? null : filtered.bitSet(), searchPlan.efSearch());
             if (graphSearchResult.ordinals().isEmpty()) {
                 return new SourceSearchResult(
                         List.of(),
@@ -350,7 +353,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                 if (!isLiveEntry.test(vector.id(), vector.sequence())) {
                     continue;
                 }
-                if ((filtered != null && !filtered.get(ordinal)) || !filterPlan.matches(vector.payload())) {
+                if ((filtered != null && !filtered.contains(ordinal)) || !filterPlan.matches(vector.payload())) {
                     continue;
                 }
 
@@ -363,7 +366,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                         vector.norm()
                 );
                 scoredCandidateCount++;
-                accumulator.offer(new SearchHit(vector.id(), score, vector.payload(), vector.sequence()));
+                accumulator.offer(vector.id(), score, vector.payload(), vector.sequence());
             }
 
             return new SourceSearchResult(
@@ -385,7 +388,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                 SearchRequest request,
                 BiPredicate<String, Long> isLiveEntry,
                 PayloadFilterPlan filterPlan,
-                BitSet filtered,
+                CandidateOrdinals filtered,
                 float queryNorm
         ) {
             TopKAccumulator accumulator = new TopKAccumulator(request.topK());
@@ -423,7 +426,7 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
                     vector.vectorOffsetBytes(),
                     vector.norm()
             );
-            accumulator.offer(new SearchHit(vector.id(), score, vector.payload(), vector.sequence()));
+            accumulator.offer(vector.id(), score, vector.payload(), vector.sequence());
             return 1;
         }
     }
@@ -433,50 +436,89 @@ public final class HnswPqSegmentIndexSearcher implements SegmentIndexSearcher {
 
     private CacheEntry cacheEntry(SearchableVectors source, AtomicBoolean indexCacheHit) {
         long now = System.nanoTime();
-        CacheEntry entry = cache.compute(source.sourceId(), (sourceId, current) -> {
+        CacheEntry entry = cache.asMap().compute(source.sourceId(), (sourceId, current) -> {
             if (current != null && current.index().version() == source.searchStateVersion()) {
                 current.touch(now);
                 indexCacheHit.set(true);
                 return current;
             }
             CacheEntry replacement = new CacheEntry(sourceId, CachedSourceIndex.build(source), now);
-            long previousBytes = current == null ? 0L : current.index().approximateBytes();
-            cachedBytes.addAndGet(replacement.index().approximateBytes() - previousBytes);
             return replacement;
         });
-        evictColdEntries(source.sourceId());
+        cache.cleanUp();
+        if (cache.getIfPresent(source.sourceId()) != entry) {
+            prepareAdmission(source.sourceId(), entry.index().approximateBytes());
+            cache.put(source.sourceId(), entry);
+            cache.cleanUp();
+        }
+        trimCache(source.sourceId());
         return entry;
     }
 
-    private void evictColdEntries(String protectedSourceId) {
-        if (cache.size() <= cacheEntryLimit && cachedBytes.get() <= cacheBudgetBytes) {
-            return;
-        }
-        List<CacheEntry> candidates = cache.values().stream()
-                .filter(entry -> !entry.sourceId().equals(protectedSourceId))
-                .sorted(Comparator.comparingLong(CacheEntry::lastAccessNanos))
-                .toList();
-        for (CacheEntry candidate : candidates) {
-            if (cache.size() <= cacheEntryLimit && cachedBytes.get() <= cacheBudgetBytes) {
+    private void prepareAdmission(String protectedSourceId, long incomingBytes) {
+        while (!cache.asMap().isEmpty()
+                && (cache.asMap().size() >= cacheEntryLimit || currentCachedBytes() + incomingBytes > cacheBudgetBytes)) {
+            if (!evictColdest(protectedSourceId)) {
                 return;
             }
-            if (cache.remove(candidate.sourceId(), candidate)) {
-                cachedBytes.addAndGet(-candidate.index().approximateBytes());
+        }
+    }
+
+    private void trimCache(String protectedSourceId) {
+        while (cache.asMap().size() > cacheEntryLimit || currentCachedBytes() > cacheBudgetBytes) {
+            if (!evictColdest(protectedSourceId)) {
+                return;
             }
         }
+    }
+
+    private boolean evictColdest(String protectedSourceId) {
+        CacheEntry coldest = null;
+        for (CacheEntry entry : cache.asMap().values()) {
+            if (entry.sourceId().equals(protectedSourceId)) {
+                continue;
+            }
+            if (coldest == null || entry.lastAccessNanos() < coldest.lastAccessNanos()) {
+                coldest = entry;
+            }
+        }
+        if (coldest == null) {
+            return false;
+        }
+        // 当前查询 source 必须被保护，避免 W-TinyLFU admission 在低容量场景拒绝刚构建的热索引。
+        cache.invalidate(coldest.sourceId());
+        cache.cleanUp();
+        return true;
     }
 
     int cachedSourceCount() {
-        return cache.size();
+        cache.cleanUp();
+        return cache.asMap().size();
     }
 
     long cachedBytes() {
-        return Math.max(0L, cachedBytes.get());
+        cache.cleanUp();
+        return currentCachedBytes();
+    }
+
+    private long currentCachedBytes() {
+        long bytes = 0L;
+        for (CacheEntry entry : cache.asMap().values()) {
+            bytes += entry.index().approximateBytes();
+        }
+        return Math.max(0L, bytes);
     }
 
     private static long estimateCacheFootprint(SearchableVectors source, int vectorCount) {
         long vectorBytes = (long) Math.max(1, vectorCount) * Math.max(1, source.dimension()) * Float.BYTES * 2L;
         return Math.max(source.approximateBytes(), vectorBytes);
+    }
+
+    private static int saturatedWeight(long bytes) {
+        if (bytes <= 0L) {
+            return 1;
+        }
+        return bytes > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) bytes;
     }
 
     private record AnnSearchPlan(boolean exact, int efSearch, int rerankLimit, long prefetchBudgetBytes) {

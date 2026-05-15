@@ -1,27 +1,31 @@
 package cn.suhoan.anaxa.index;
 
 import cn.suhoan.anaxa.common.json.JsonSupport;
+import org.roaringbitmap.RoaringBitmap;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
+import java.io.DataInputStream;
 import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 public final class PayloadFilterIndex {
     private final int size;
-    private final Map<FilterKey, BitSet> postings;
+    private final Map<FilterKey, RoaringBitmap> postings;
 
-    private PayloadFilterIndex(int size, Map<FilterKey, BitSet> postings) {
+    private PayloadFilterIndex(int size, Map<FilterKey, RoaringBitmap> postings) {
         this.size = size;
         this.postings = postings;
     }
 
     public static PayloadFilterIndex build(List<Map<String, Object>> payloads) {
-        HashMap<FilterKey, BitSet> postings = new HashMap<>();
+        HashMap<FilterKey, RoaringBitmap> postings = new HashMap<>();
         for (int ordinal = 0; ordinal < payloads.size(); ordinal++) {
             indexDocument(postings, payloads.get(ordinal), ordinal, payloads.size(), null);
         }
@@ -32,24 +36,24 @@ public final class PayloadFilterIndex {
         return size;
     }
 
-    public BitSet allOrdinals() {
-        BitSet all = new BitSet(size);
-        all.set(0, size);
+    public RoaringBitmap allOrdinals() {
+        RoaringBitmap all = new RoaringBitmap();
+        all.add(0L, size);
         return all;
     }
 
-    public BitSet exactMatch(String key, Object value) {
-        BitSet posting = postings.get(FilterKey.of(key, value));
-        return posting == null ? new BitSet(size) : (BitSet) posting.clone();
+    public RoaringBitmap exactMatch(String key, Object value) {
+        RoaringBitmap posting = postings.get(FilterKey.of(key, value));
+        return posting == null ? new RoaringBitmap() : posting.clone();
     }
 
     public void writeTo(DataOutput output) throws IOException {
         output.writeInt(size);
         output.writeInt(postings.size());
-        for (Map.Entry<FilterKey, BitSet> entry : postings.entrySet()) {
+        for (Map.Entry<FilterKey, RoaringBitmap> entry : postings.entrySet()) {
             writeString(output, entry.getKey().key());
             writeString(output, entry.getKey().valueJson());
-            byte[] bits = entry.getValue().toByteArray();
+            byte[] bits = serializeBitmap(entry.getValue());
             output.writeInt(bits.length);
             output.write(bits);
         }
@@ -58,19 +62,35 @@ public final class PayloadFilterIndex {
     public static PayloadFilterIndex readFrom(DataInput input) throws IOException {
         int size = input.readInt();
         int postingCount = input.readInt();
-        HashMap<FilterKey, BitSet> postings = new HashMap<>(postingCount);
+        HashMap<FilterKey, RoaringBitmap> postings = new HashMap<>(postingCount);
         for (int index = 0; index < postingCount; index++) {
             String key = readString(input);
             String valueJson = readString(input);
             byte[] bits = new byte[input.readInt()];
             input.readFully(bits);
-            postings.put(new FilterKey(key, valueJson), BitSet.valueOf(bits));
+            postings.put(new FilterKey(key, valueJson), deserializeBitmap(bits));
         }
         return new PayloadFilterIndex(size, Map.copyOf(postings));
     }
 
+    private static byte[] serializeBitmap(RoaringBitmap bitmap) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(bitmap.serializedSizeInBytes());
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            bitmap.serialize(output);
+        }
+        return bytes.toByteArray();
+    }
+
+    private static RoaringBitmap deserializeBitmap(byte[] bytes) throws IOException {
+        RoaringBitmap bitmap = new RoaringBitmap();
+        try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes))) {
+            bitmap.deserialize(input);
+        }
+        return bitmap;
+    }
+
     private static void indexDocument(
-            Map<FilterKey, BitSet> postings,
+            Map<FilterKey, RoaringBitmap> postings,
             Object value,
             int ordinal,
             int size,
@@ -100,7 +120,7 @@ public final class PayloadFilterIndex {
             return;
         }
 
-        postings.computeIfAbsent(FilterKey.of(path, value), ignored -> new BitSet(size)).set(ordinal);
+        postings.computeIfAbsent(FilterKey.of(path, value), ignored -> new RoaringBitmap()).add(ordinal);
     }
 
     private static void writeString(DataOutput output, String value) throws IOException {

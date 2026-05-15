@@ -1,12 +1,10 @@
 package cn.suhoan.anaxa.index;
 
 import cn.suhoan.anaxa.common.model.MetricType;
-import cn.suhoan.anaxa.common.model.SearchHit;
 import cn.suhoan.anaxa.common.model.SearchRequest;
 
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiPredicate;
@@ -34,7 +32,7 @@ public final class FlatSegmentIndexSearcher implements SegmentIndexSearcher {
         PayloadFilterIndex payloadIndex = PayloadFilterIndex.build(payloads);
         PayloadColumnStore payloadColumnStore = PayloadColumnStore.build(payloads);
         PayloadFilterPlan filterPlan = PayloadFilterPlan.compile(request.filter(), payloadIndex, payloadColumnStore);
-        BitSet filtered = filterPlan.candidateOrdinals();
+        CandidateOrdinals filtered = filterPlan.candidateOrdinals();
         int filterCandidateCount = filtered == null ? vectors.size() : filtered.cardinality();
         if (filtered != null && filtered.isEmpty()) {
             return new SourceSearchResult(
@@ -83,7 +81,7 @@ public final class FlatSegmentIndexSearcher implements SegmentIndexSearcher {
                 vector.vectorOffsetBytes(),
                 vector.norm()
         );
-        accumulator.offer(new SearchHit(vector.id(), score, vector.payload(), vector.sequence()));
+        accumulator.offer(vector.id(), score, vector.payload(), vector.sequence());
         return 1;
     }
 

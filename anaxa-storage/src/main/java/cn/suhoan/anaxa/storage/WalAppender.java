@@ -22,11 +22,13 @@ public final class WalAppender implements AutoCloseable {
     private final Path path;
     private final FileChannel channel;
     private final int dimension;
+    private final CRC32 recordChecksum;
 
     private WalAppender(Path path, FileChannel channel, int dimension) {
         this.path = path;
         this.channel = channel;
         this.dimension = dimension;
+        this.recordChecksum = new CRC32();
     }
 
     public static WalAppender open(Path path, int dimension) throws IOException {
@@ -49,6 +51,7 @@ public final class WalAppender implements AutoCloseable {
         for (WalRecord record : records) {
             writeRecord(record);
         }
+        // 保持每批 WAL 持久化语义不变：只有减少 CPU/对象分配，不降低 fsync 可靠性。
         channel.force(false);
     }
 
@@ -123,7 +126,7 @@ public final class WalAppender implements AutoCloseable {
             }
         }
         buffer.put(payloadBytes);
-        int checksum = checksum(buffer.array(), bodyStart, bodyLength);
+        int checksum = checksum(recordChecksum, buffer.array(), bodyStart, bodyLength);
         buffer.putInt(checksum);
         buffer.flip();
         writeFully(buffer);
@@ -143,6 +146,12 @@ public final class WalAppender implements AutoCloseable {
 
     static int checksum(byte[] body, int offset, int length) {
         CRC32 crc32 = new CRC32();
+        crc32.update(body, offset, length);
+        return (int) crc32.getValue();
+    }
+
+    private static int checksum(CRC32 crc32, byte[] body, int offset, int length) {
+        crc32.reset();
         crc32.update(body, offset, length);
         return (int) crc32.getValue();
     }

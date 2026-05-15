@@ -7,7 +7,7 @@
     <parent>
         <groupId>cn.suhoan</groupId>
         <artifactId>anaxa</artifactId>
-        <version>1.4</version>
+        <version>1.5</version>
     </parent>
 
     <artifactId>anaxa-index</artifactId>
@@ -22,6 +22,14 @@
             <groupId>cn.suhoan</groupId>
             <artifactId>anaxa-common</artifactId>
             <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.roaringbitmap</groupId>
+            <artifactId>RoaringBitmap</artifactId>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

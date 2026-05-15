@@ -19,5 +19,5 @@ USER anaxa
 EXPOSE 30720
 VOLUME ["/data/anaxa"]
 
-ENTRYPOINT ["java", "-XX:+UseCompactObjectHeaders", "-XX:+UseZGC", "--enable-preview", "-jar", "/opt/anaxa/anaxa-server.jar"]
+ENTRYPOINT ["java", "-XX:+UseCompactObjectHeaders", "-XX:+UseG1GC", "--enable-preview", "-jar", "/opt/anaxa/anaxa-server.jar"]
 CMD ["--host=0.0.0.0", "--port=30720", "--data-dir=/data/anaxa"]

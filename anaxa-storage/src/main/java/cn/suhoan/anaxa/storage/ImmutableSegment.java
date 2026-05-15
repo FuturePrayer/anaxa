@@ -32,9 +32,11 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
     static final int FOOTER_MAGIC = 0x53454746;
     static final long FOOTER_BYTES = Integer.BYTES + Integer.BYTES + Long.BYTES;
     private static final long PREFETCH_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(250L);
+    private static final int CHECKSUM_CHUNK_BYTES = 1024 * 1024;
     private static final ValueLayout.OfInt INT_LAYOUT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
     private static final ValueLayout.OfLong LONG_LAYOUT = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
     private static final ValueLayout.OfFloat FLOAT_LAYOUT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
+    private static final ValueLayout.OfFloat VECTOR_FLOAT_LAYOUT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
 
     private final Path path;
     private final CollectionDefinition definition;
@@ -162,7 +164,9 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         float[] vector = new float[definition.dimension()];
         long offset = entry.vectorOffsetBytes();
         for (int index = 0; index < vector.length; index++) {
-            vector[index] = mappedSegment.get(FLOAT_LAYOUT, offset + (long) index * Float.BYTES);
+            // 向量字节来自 MemTable 的 native-order off-heap 布局；这里必须保持一致，
+            // 否则重启后 partial update 会把错误向量重新写入 WAL/segment，影响生产数据可靠性。
+            vector[index] = mappedSegment.get(VECTOR_FLOAT_LAYOUT, offset + (long) index * Float.BYTES);
         }
         return vector;
     }
@@ -287,7 +291,23 @@ public final class ImmutableSegment implements SearchableVectors, AutoCloseable 
         }
 
         CRC32 crc32 = new CRC32();
-        crc32.update(mappedSegment.asSlice(0L, dataLength).toArray(ValueLayout.JAVA_BYTE));
+        byte[] checksumBuffer = new byte[(int) Math.min(CHECKSUM_CHUNK_BYTES, Math.max(1L, dataLength))];
+        long offset = 0L;
+        while (offset < dataLength) {
+            int chunkBytes = (int) Math.min(checksumBuffer.length, dataLength - offset);
+            MemorySegment.copy(
+                    mappedSegment,
+                    ValueLayout.JAVA_BYTE,
+                    offset,
+                    MemorySegment.ofArray(checksumBuffer),
+                    ValueLayout.JAVA_BYTE,
+                    0,
+                    chunkBytes
+            );
+            // 分块校验避免加载大 segment 时一次性复制整个 mmap 文件，可靠性保持不变但显著降低堆峰值。
+            crc32.update(checksumBuffer, 0, chunkBytes);
+            offset += chunkBytes;
+        }
         if ((int) crc32.getValue() != expectedChecksum) {
             throw new IOException("Segment checksum mismatch");
         }

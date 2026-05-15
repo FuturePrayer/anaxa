@@ -1,18 +1,19 @@
 package cn.suhoan.anaxa.index;
 
+import org.roaringbitmap.RoaringBitmap;
+
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 final class PayloadFilterPlan {
-    private final BitSet candidateOrdinals;
+    private final CandidateOrdinals candidateOrdinals;
     private final Expression expression;
     private final boolean usesIndex;
 
-    private PayloadFilterPlan(BitSet candidateOrdinals, Expression expression, boolean usesIndex) {
+    private PayloadFilterPlan(CandidateOrdinals candidateOrdinals, Expression expression, boolean usesIndex) {
         this.candidateOrdinals = candidateOrdinals;
         this.expression = expression;
         this.usesIndex = usesIndex;
@@ -23,11 +24,12 @@ final class PayloadFilterPlan {
             return new PayloadFilterPlan(null, payload -> true, false);
         }
         Expression expression = parseExpression(filter);
-        return new PayloadFilterPlan(expression.candidates(index, columnStore), expression, expression.usesIndex());
+        RoaringBitmap candidates = expression.candidates(index, columnStore);
+        return new PayloadFilterPlan(candidates == null ? null : CandidateOrdinals.of(candidates), expression, expression.usesIndex());
     }
 
-    BitSet candidateOrdinals() {
-        return candidateOrdinals == null ? null : (BitSet) candidateOrdinals.clone();
+    CandidateOrdinals candidateOrdinals() {
+        return candidateOrdinals;
     }
 
     boolean matches(Map<String, Object> payload) {
@@ -79,6 +81,7 @@ final class PayloadFilterPlan {
     }
 
     private static Expression parseFieldExpression(String field, Object value) {
+        FieldPath fieldPath = FieldPath.of(field);
         if (value instanceof Map<?, ?> map && isOperatorMap(map)) {
             ArrayList<Expression> predicates = new ArrayList<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
@@ -86,7 +89,7 @@ final class PayloadFilterPlan {
                 if (operator == null) {
                     throw new IllegalArgumentException("Filter operators must be strings");
                 }
-                predicates.add(parseOperator(field, operator, entry.getValue()));
+                predicates.add(parseOperator(field, fieldPath, operator, entry.getValue()));
             }
             return combineAnd(predicates);
         }
@@ -100,7 +103,7 @@ final class PayloadFilterPlan {
             }
             return combineAnd(predicates);
         }
-        return new EqualsExpression(field, value);
+        return new EqualsExpression(field, fieldPath, value);
     }
 
     private static boolean isOperatorMap(Map<?, ?> map) {
@@ -112,15 +115,15 @@ final class PayloadFilterPlan {
         return false;
     }
 
-    private static Expression parseOperator(String field, String operator, Object value) {
+    private static Expression parseOperator(String field, FieldPath fieldPath, String operator, Object value) {
         return switch (operator) {
-            case "$eq" -> new EqualsExpression(field, value);
-            case "$in" -> new InExpression(field, requireList(operator, value));
-            case "$contains" -> new ContainsExpression(field, value);
-            case "$gt" -> new RangeExpression(field, value, false, null, false);
-            case "$gte" -> new RangeExpression(field, value, true, null, false);
-            case "$lt" -> new RangeExpression(field, null, false, value, false);
-            case "$lte" -> new RangeExpression(field, null, false, value, true);
+            case "$eq" -> new EqualsExpression(field, fieldPath, value);
+            case "$in" -> new InExpression(field, fieldPath, requireList(operator, value));
+            case "$contains" -> new ContainsExpression(field, fieldPath, value);
+            case "$gt" -> new RangeExpression(field, fieldPath, value, false, null, false);
+            case "$gte" -> new RangeExpression(field, fieldPath, value, true, null, false);
+            case "$lt" -> new RangeExpression(field, fieldPath, null, false, value, false);
+            case "$lte" -> new RangeExpression(field, fieldPath, null, false, value, true);
             default -> throw new IllegalArgumentException("Unsupported filter operator: " + operator);
         };
     }
@@ -142,9 +145,9 @@ final class PayloadFilterPlan {
         return new AndExpression(expressions);
     }
 
-    private static Object resolveField(Map<String, Object> payload, String field) {
+    private static Object resolveField(Map<String, Object> payload, FieldPath field) {
         Object current = payload;
-        for (String token : field.split("\\.")) {
+        for (String token : field.tokens()) {
             if (!(current instanceof Map<?, ?> map)) {
                 return null;
             }
@@ -154,6 +157,13 @@ final class PayloadFilterPlan {
             }
         }
         return current;
+    }
+
+    private record FieldPath(String[] tokens) {
+        private static FieldPath of(String field) {
+            // filter.matches 可能在精确扫描中执行数十万次；预先拆分字段路径，避免每个候选都做 regex split。
+            return new FieldPath(field.split("\\."));
+        }
     }
 
     private static boolean containsValue(Object candidate, Object expected) {
@@ -195,7 +205,7 @@ final class PayloadFilterPlan {
     private interface Expression {
         boolean matches(Map<String, Object> payload);
 
-        default BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+        default RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
             return null;
         }
 
@@ -216,10 +226,10 @@ final class PayloadFilterPlan {
         }
 
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
-            BitSet candidates = null;
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+            RoaringBitmap candidates = null;
             for (Expression child : children) {
-                BitSet childCandidates = child.candidates(index, columnStore);
+                RoaringBitmap childCandidates = child.candidates(index, columnStore);
                 if (childCandidates == null) {
                     continue;
                 }
@@ -253,10 +263,10 @@ final class PayloadFilterPlan {
         }
 
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
-            BitSet candidates = null;
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+            RoaringBitmap candidates = null;
             for (Expression child : children) {
-                BitSet childCandidates = child.candidates(index, columnStore);
+                RoaringBitmap childCandidates = child.candidates(index, columnStore);
                 if (childCandidates == null) {
                     return null;
                 }
@@ -282,12 +292,12 @@ final class PayloadFilterPlan {
         }
 
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
-            BitSet childCandidates = child.candidates(index, columnStore);
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+            RoaringBitmap childCandidates = child.candidates(index, columnStore);
             if (childCandidates == null) {
                 return null;
             }
-            BitSet all = index.allOrdinals();
+            RoaringBitmap all = index.allOrdinals();
             all.andNot(childCandidates);
             return all;
         }
@@ -298,14 +308,14 @@ final class PayloadFilterPlan {
         }
     }
 
-    private record EqualsExpression(String field, Object expected) implements Expression {
+    private record EqualsExpression(String field, FieldPath fieldPath, Object expected) implements Expression {
         @Override
         public boolean matches(Map<String, Object> payload) {
-            return Objects.equals(resolveField(payload, field), expected);
+            return Objects.equals(resolveField(payload, fieldPath), expected);
         }
 
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
             return index.exactMatch(field, expected);
         }
 
@@ -315,10 +325,10 @@ final class PayloadFilterPlan {
         }
     }
 
-    private record InExpression(String field, List<?> expectedValues) implements Expression {
+    private record InExpression(String field, FieldPath fieldPath, List<?> expectedValues) implements Expression {
         @Override
         public boolean matches(Map<String, Object> payload) {
-            Object value = resolveField(payload, field);
+            Object value = resolveField(payload, fieldPath);
             for (Object expected : expectedValues) {
                 if (Objects.equals(value, expected)) {
                     return true;
@@ -328,8 +338,8 @@ final class PayloadFilterPlan {
         }
 
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
-            BitSet candidates = new BitSet(index.size());
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+            RoaringBitmap candidates = new RoaringBitmap();
             for (Object expected : expectedValues) {
                 candidates.or(index.exactMatch(field, expected));
             }
@@ -342,14 +352,14 @@ final class PayloadFilterPlan {
         }
     }
 
-    private record ContainsExpression(String field, Object expected) implements Expression {
+    private record ContainsExpression(String field, FieldPath fieldPath, Object expected) implements Expression {
         @Override
         public boolean matches(Map<String, Object> payload) {
-            return containsValue(resolveField(payload, field), expected);
+            return containsValue(resolveField(payload, fieldPath), expected);
         }
 
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
             return index.exactMatch(field, expected);
         }
 
@@ -361,13 +371,14 @@ final class PayloadFilterPlan {
 
     private record RangeExpression(
             String field,
+            FieldPath fieldPath,
             Object lowerBound,
             boolean includeLowerBound,
             Object upperBound,
             boolean includeUpperBound
     ) implements Expression {
         @Override
-        public BitSet candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
+        public RoaringBitmap candidates(PayloadFilterIndex index, PayloadColumnStore columnStore) {
             return columnStore == null
                     ? null
                     : columnStore.rangeMatch(field, lowerBound, includeLowerBound, upperBound, includeUpperBound);
@@ -375,7 +386,7 @@ final class PayloadFilterPlan {
 
         @Override
         public boolean matches(Map<String, Object> payload) {
-            Object actual = resolveField(payload, field);
+            Object actual = resolveField(payload, fieldPath);
             if (actual == null) {
                 return false;
             }

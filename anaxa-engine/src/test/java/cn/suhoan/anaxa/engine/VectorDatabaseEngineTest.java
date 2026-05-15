@@ -373,6 +373,32 @@ class VectorDatabaseEngineTest {
     }
 
     @Test
+    void partialUpdateAfterRestartKeepsPersistedVectorReadable() throws Exception {
+        Path dataDir = tempDir.resolve("partial-update-persisted-vector");
+        try (VectorDatabaseEngine engine = new VectorDatabaseEngine(dataDir, 1_000_000L)) {
+            engine.createCollection(new CreateCollectionRequest("docs", 3, MetricType.COSINE, 1_000_000L));
+            engine.upsert("docs", new UpsertVectorsRequest(List.of(
+                    new UpsertVector("alpha", new float[]{0.125F, 1.0F, -0.5F}, Map.of("title", "Intro"))
+            )));
+            engine.flush("docs");
+        }
+
+        try (VectorDatabaseEngine reopened = new VectorDatabaseEngine(dataDir, 1_000_000L)) {
+            reopened.partialUpdate("docs", new PartialUpdateVectorsRequest(List.of(
+                    new PartialUpdateVector("alpha", Map.of("title", "Intro v2"))
+            )));
+
+            SearchResponse recovered = reopened.search("docs", new SearchRequest(
+                    new float[]{0.125F, 1.0F, -0.5F},
+                    1,
+                    Map.of("title", "Intro v2")
+            ));
+            assertEquals(List.of("alpha"), recovered.hits().stream().map(hit -> hit.id()).toList());
+            assertTrue(recovered.hits().get(0).score() > 0.99F);
+        }
+    }
+
+    @Test
     void searchesLargeCollectionThroughGraphIndex() throws Exception {
         try (VectorDatabaseEngine engine = new VectorDatabaseEngine(tempDir.resolve("graph-index"), 1_000_000L)) {
             engine.createCollection(new CreateCollectionRequest("docs", 16, MetricType.COSINE, 1_000_000L));

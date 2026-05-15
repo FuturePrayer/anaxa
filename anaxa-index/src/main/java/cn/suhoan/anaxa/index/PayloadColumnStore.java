@@ -1,5 +1,7 @@
 package cn.suhoan.anaxa.index;
 
+import org.roaringbitmap.RoaringBitmap;
+
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
@@ -48,7 +50,7 @@ final class PayloadColumnStore {
         return size;
     }
 
-    BitSet rangeMatch(String field, Object lowerBound, boolean includeLowerBound, Object upperBound, boolean includeUpperBound) {
+    RoaringBitmap rangeMatch(String field, Object lowerBound, boolean includeLowerBound, Object upperBound, boolean includeUpperBound) {
         if ((lowerBound instanceof Number || upperBound instanceof Number) && numericColumns.containsKey(field)) {
             return numericColumns.get(field).match(lowerBound, includeLowerBound, upperBound, includeUpperBound);
         }
@@ -170,8 +172,8 @@ final class PayloadColumnStore {
     }
 
     private record NumericColumn(double[] values, BitSet present) {
-        private BitSet match(Object lowerBound, boolean includeLowerBound, Object upperBound, boolean includeUpperBound) {
-            BitSet matches = new BitSet(values.length);
+        private RoaringBitmap match(Object lowerBound, boolean includeLowerBound, Object upperBound, boolean includeUpperBound) {
+            RoaringBitmap matches = new RoaringBitmap();
             for (int ordinal = present.nextSetBit(0); ordinal >= 0; ordinal = present.nextSetBit(ordinal + 1)) {
                 double value = values[ordinal];
                 if (lowerBound instanceof Number lower) {
@@ -186,7 +188,7 @@ final class PayloadColumnStore {
                         continue;
                     }
                 }
-                matches.set(ordinal);
+                matches.add(ordinal);
             }
             return matches;
         }
@@ -212,8 +214,8 @@ final class PayloadColumnStore {
     }
 
     private record StringColumn(String[] values, BitSet present) {
-        private BitSet match(Object lowerBound, boolean includeLowerBound, Object upperBound, boolean includeUpperBound) {
-            BitSet matches = new BitSet(values.length);
+        private RoaringBitmap match(Object lowerBound, boolean includeLowerBound, Object upperBound, boolean includeUpperBound) {
+            RoaringBitmap matches = new RoaringBitmap();
             for (int ordinal = present.nextSetBit(0); ordinal >= 0; ordinal = present.nextSetBit(ordinal + 1)) {
                 String value = values[ordinal];
                 if (lowerBound instanceof String lower) {
@@ -228,7 +230,7 @@ final class PayloadColumnStore {
                         continue;
                     }
                 }
-                matches.set(ordinal);
+                matches.add(ordinal);
             }
             return matches;
         }

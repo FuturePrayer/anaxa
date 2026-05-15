@@ -25,6 +25,8 @@ import cn.suhoan.anaxa.storage.SegmentWriter;
 import cn.suhoan.anaxa.storage.WalAppender;
 import cn.suhoan.anaxa.storage.WalRecord;
 import cn.suhoan.anaxa.storage.WalReplay;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -63,6 +65,7 @@ final class EngineCollection implements AutoCloseable {
     private static final int MIN_ADAPTIVE_FLUSH_MUTATIONS = 256;
     private static final int MAX_ADAPTIVE_FLUSH_MUTATIONS = 4_096;
     private static final int MAX_WARM_QUEUE_DEPTH = 8;
+    private static final int QUERY_CACHE_MAX_ENTRIES = 128;
     private static final long STALE_VERSION_COMPACTION_THRESHOLD = 512L;
     private static final long TOMBSTONE_COMPACTION_THRESHOLD = 256L;
     private static final double TOMBSTONE_RATIO_COMPACTION_THRESHOLD = 0.15D;
@@ -139,7 +142,7 @@ final class EngineCollection implements AutoCloseable {
         this.tombstoneDebt = new AtomicLong(persistedTombstoneCount(segments));
         this.flushExecutor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("anaxa-flush-", 0).factory());
         this.prefetchExecutor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("anaxa-warm-", 0).factory());
-        this.queryCache = new QueryCache(128);
+        this.queryCache = new QueryCache(QUERY_CACHE_MAX_ENTRIES);
         this.searchLifecycleMonitor = new Object();
         this.residentSources = new ConcurrentHashMap<>();
         this.residentSourceBytes = new AtomicLong();
@@ -1560,19 +1563,16 @@ final class EngineCollection implements AutoCloseable {
     }
 
     private static final class QueryCache {
-        private final Map<QueryCacheKey, SearchResponse> entries;
+        private final Cache<QueryCacheKey, SearchResponse> entries;
 
         private QueryCache(int maxEntries) {
-            this.entries = java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>(16, 0.75F, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<QueryCacheKey, SearchResponse> eldest) {
-                    return size() > maxEntries;
-                }
-            });
+            this.entries = Caffeine.newBuilder()
+                    .maximumSize(maxEntries)
+                    .build();
         }
 
         private SearchResponse get(SearchRequest request) {
-            return entries.get(QueryCacheKey.of(request));
+            return entries.getIfPresent(QueryCacheKey.of(request));
         }
 
         private void put(SearchRequest request, SearchResponse response) {
@@ -1580,7 +1580,7 @@ final class EngineCollection implements AutoCloseable {
         }
 
         private void clear() {
-            entries.clear();
+            entries.invalidateAll();
         }
     }
 
